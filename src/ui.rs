@@ -2853,10 +2853,14 @@ impl ScrawlCoordinator {
                             }
                             let duration_ms =
                                 finalized.as_ref().map_or(0, |(_, b, _)| b.duration_ms);
-                            return (finalized, duration_ms);
+                            return (finalized, duration_ms, crate::audio::Sound::Heard);
                         }
                         CaptureSource::Lab => {
-                            return (Err(anyhow::anyhow!("a lab recording has no bundle")), 0);
+                            return (
+                                Err(anyhow::anyhow!("a lab recording has no bundle")),
+                                0,
+                                crate::audio::Sound::Heard,
+                            );
                         }
                     };
                     let stop_started = Instant::now();
@@ -2877,6 +2881,9 @@ impl ScrawlCoordinator {
                     activity.stop_started = Some(stop_started);
                     activity.stop_ms = Some(stop_started.elapsed().as_millis() as u64);
                     let duration_ms = recording.duration_ms;
+                    let sound = recorded_audio
+                        .as_ref()
+                        .map_or(crate::audio::Sound::Nothing, |audio| audio.sound);
                     let finalized = crate::finalize_capture_bundle(
                         &bundle_dir,
                         target,
@@ -2887,7 +2894,7 @@ impl ScrawlCoordinator {
                         None,
                         activity,
                     );
-                    (finalized, duration_ms)
+                    (finalized, duration_ms, sound)
                 })
                 .await;
 
@@ -2896,10 +2903,16 @@ impl ScrawlCoordinator {
             // when the server is down, so its outcome follows when it's ready.
             let routed = entity
                 .update(cx, |coord, cx| {
-                    let (finalized, duration_ms) = result;
+                    let (finalized, duration_ms, sound) = result;
                     let mut frame_count = 1;
                     let mut routed = None;
                     coord.completed_dir = None;
+                    // Said where "Copied" goes, so a capture with a dead microphone is noticed
+                    // now; a destination's "Sending to…" replaces it.
+                    if let Some(warning) = sound.warning() {
+                        scrawl_log(format!("finish: {warning}"));
+                        coord.completed_note = Some(format!("Copied · {warning}"));
+                    }
                     if let Ok((dir, bundle, _)) = finalized {
                         frame_count = bundle.keyframes.len();
                         let _ = crate::handoff::copy_bundle_to_clipboard(&dir);

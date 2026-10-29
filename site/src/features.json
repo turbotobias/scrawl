@@ -161,6 +161,16 @@
       "docs": ["docs/motion.md"]
     },
     {
+      "id": "no-sound-warning",
+      "group": "record",
+      "name": "No-sound warning",
+      "says": "When the microphone gave nothing, or gave out partway, the finished capsule says \"Copied · no sound\" and the summary says why there's no transcript.",
+      "status": "main",
+      "platforms": ["mac", "windows", "linux"],
+      "added": "2026-10-29",
+      "docs": ["README.md#settings"]
+    },
+    {
       "id": "hidden-windows",
       "group": "record",
       "name": "Own windows left out",

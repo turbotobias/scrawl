@@ -958,6 +958,20 @@ pub fn finalize_capture_bundle(
         (transcribe_handle.join().unwrap(), pre)
     });
 
+    let mut transcript = transcript;
+    let sound = recorded_audio
+        .as_ref()
+        .map_or(audio::Sound::Nothing, |audio| audio.sound);
+    if sound == audio::Sound::Nothing
+        && transcript.text.trim().is_empty()
+        && transcript.missing.is_none()
+    {
+        transcript.missing = Some(model::MissingTranscript {
+            reason: "The microphone recorded nothing: it's muted, the wrong input, or missing."
+                .into(),
+            retry: false,
+        });
+    }
     let built = build_bundle_from_parts(
         bundle_dir,
         target,

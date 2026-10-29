@@ -195,6 +195,12 @@ narration uses the same microphone. From the terminal, `scrawl mic list` shows t
 one recordings will use, `scrawl mic set <id|default>` chooses, and `scrawl mic watch` prints the
 list again on every change.
 
+When a capture's microphone gave nothing (muted, the wrong input, or none), the capsule says
+**Copied · no sound** as the capture finishes, and `summary.md` says why there's no transcript. When
+it gave out partway (an error, or nothing but zeros for the last 3 s or more), it says **Copied · no
+sound after 1:02**. A quiet room isn't silence: a working microphone's own hiss is louder than the
+-70 dB it takes.
+
 Preview every pane, dark and light, with the recorder listening and a combination turned down:
 `target/debug/scrawl-helper settings --render /tmp/settings --icon assets/app-icon.png`.
 

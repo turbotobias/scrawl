@@ -13,6 +13,65 @@ pub struct RecordedAudio {
     pub wav_bytes: Vec<u8>,
     /// The transcription that ran while recording, if one did (`live_transcribe`).
     pub live: crate::live_transcribe::Slot,
+    /// Whether the microphone gave anything (`Sound::of`).
+    pub sound: Sound,
+}
+
+/// What a capture's microphone gave, so a muted, wrong or broken input is noticed when the
+/// capture finishes rather than when its transcript turns up empty.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sound {
+    #[default]
+    Heard,
+    /// No audio, or none louder than `SILENT_DB` all the way through.
+    Nothing,
+    /// Sound until this many ms in, then the input gave out: it reported an error, or it sent
+    /// only digital silence for the last `GAVE_OUT_MS` or more.
+    StoppedAt(u64),
+}
+
+/// 50 ms windows, as the level is measured.
+const WINDOW: usize = SAMPLE_RATE as usize / 20;
+/// Quieter than any room heard through a working microphone: its own hiss is louder.
+const SILENT_DB: f32 = -70.0;
+/// A 16-bit sample of 0 or ±1: nothing is coming from the input at all.
+const DEAD: f32 = 1.5 / 32_768.0;
+const GAVE_OUT_MS: u64 = 3_000;
+
+impl Sound {
+    /// `broke_off`: the input reported an error partway (`AudioRecorder::stop`).
+    pub fn of(samples: &[f32], broke_off: bool) -> Self {
+        let heard = |w: &[f32]| {
+            let rms = (w.iter().map(|x| x * x).sum::<f32>() / w.len() as f32).sqrt();
+            20.0 * rms.max(1e-9).log10() >= SILENT_DB
+        };
+        let Some(last) = samples.chunks(WINDOW).rposition(heard) else {
+            return Self::Nothing;
+        };
+        let end = ((last + 1) * WINDOW).min(samples.len());
+        let ms = |n: usize| n as u64 * 1_000 / u64::from(SAMPLE_RATE);
+        let tail = &samples[end..];
+        if ms(tail.len()) >= GAVE_OUT_MS && tail.iter().all(|x| x.abs() < DEAD) {
+            Self::StoppedAt(ms(end))
+        } else if broke_off {
+            Self::StoppedAt(ms(samples.len()))
+        } else {
+            Self::Heard
+        }
+    }
+
+    /// For the capsule when the capture is done: `None` when there was sound.
+    pub fn warning(self) -> Option<String> {
+        match self {
+            Self::Heard => None,
+            Self::Nothing => Some("no sound".into()),
+            Self::StoppedAt(ms) => Some(format!("no sound after {}", clock(ms))),
+        }
+    }
+}
+
+fn clock(ms: u64) -> String {
+    format!("{}:{:02}", ms / 60_000, ms / 1_000 % 60)
 }
 
 pub struct AudioRecorder {
@@ -180,12 +239,13 @@ impl AudioRecorder {
                 .map_err(|_| anyhow!("Microphone buffer lock poisoned"))?,
         );
         // An overload, or a device unplugged partway, keeps what was heard before it.
-        if let Some(error) = error {
+        if let Some(error) = &error {
             if samples_16k.is_empty() {
                 bail!("Microphone capture failed: {error}");
             }
             crate::capture::scrawl_log(format!("Microphone: {error}; keeping what it heard"));
         }
+        let sound = Sound::of(&samples_16k, error.is_some());
         let sample_count = samples_16k.len();
         let duration_ms = sample_count as u64 * 1_000 / SAMPLE_RATE as u64;
         let wav_bytes = encode_wav_16k(&samples_16k)?;
@@ -194,6 +254,7 @@ impl AudioRecorder {
             duration_ms,
             wav_bytes,
             live: crate::live_transcribe::Slot::new(self.live.take()),
+            sound,
         })
     }
 }
@@ -272,6 +333,7 @@ pub fn recorded_audio_from_wav(wav_bytes: Vec<u8>) -> Result<RecordedAudio> {
         duration_ms: sample_count as u64 * 1_000 / u64::from(SAMPLE_RATE),
         wav_bytes,
         live: Default::default(),
+        sound: Sound::Heard,
     })
 }
 
@@ -421,6 +483,37 @@ mod tests {
                 .unwrap()
                 .duration(),
             3
+        );
+    }
+
+    #[test]
+    fn sound_tells_a_dead_or_silent_input_from_a_quiet_room() {
+        let second = SAMPLE_RATE as usize;
+        // A working microphone in a quiet room: hiss around -60 dB, no speech.
+        let hiss: Vec<f32> = (0..10 * second)
+            .map(|i| if i % 2 == 0 { 0.001 } else { -0.001 })
+            .collect();
+        assert_eq!(Sound::of(&hiss, false), Sound::Heard);
+        assert_eq!(Sound::of(&[], false), Sound::Nothing);
+        assert_eq!(Sound::of(&vec![0.0; 10 * second], false), Sound::Nothing);
+        assert_eq!(Sound::of(&vec![0.0001; 10 * second], false), Sound::Nothing);
+
+        // Speech, then the input sends zeros: it gave out where the sound ended.
+        let mut gave_out = hiss.clone();
+        gave_out[4 * second..].fill(0.0);
+        assert_eq!(Sound::of(&gave_out, false), Sound::StoppedAt(4_000));
+        // A short gap of zeros at the end is a stop, not a dead input.
+        let mut short = hiss.clone();
+        short[9 * second..].fill(0.0);
+        assert_eq!(Sound::of(&short, false), Sound::Heard);
+        // An input that errored partway stopped where its samples end.
+        assert_eq!(Sound::of(&hiss[..5 * second], true), Sound::StoppedAt(5_000));
+
+        assert_eq!(Sound::Heard.warning(), None);
+        assert_eq!(Sound::Nothing.warning().as_deref(), Some("no sound"));
+        assert_eq!(
+            Sound::StoppedAt(62_500).warning().as_deref(),
+            Some("no sound after 1:02")
         );
     }
 

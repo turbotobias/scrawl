@@ -1507,6 +1507,11 @@ mod tests {
                 completed("Sending to DESKTOP…", &["Send to OPENCODE IOS"]),
             ),
             ("4-sent", completed("Sent to OPENCODE IOS", &[])),
+            // A capture whose microphone gave out (`audio::Sound`), with a route offered.
+            (
+                "5-no-sound",
+                completed("Copied · no sound after 12:34", &["Send to DESKTOP"]),
+            ),
         ];
         let out = std::env::var_os("SCRAWL_PILL_STILLS").map(std::path::PathBuf::from);
         if let Some(dir) = &out {
