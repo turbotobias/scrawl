@@ -216,6 +216,8 @@ Preview every pane, dark and light, with the recorder listening and a combinatio
 - **`⇧`-click**: Drop a numbered pin where you click (a press that moves under 12 pt and lets go within 1 s; longer is ink). It shows as a brief red pulse, not a lasting dot, and lands on the keyframes. A click after you've drawn in the same `⇧` hold is part of the drawing and drops no pin
 - **`⌘Z`**: Undo the last stroke
 - **`Esc`**: Cancel the active selection or capture
+- **Drag the capsule**: Move it out of the way. It stays there for later captures; drop it near
+  the top centre to put it back
 
 While picking a target, the island shows the modes **Area**, **Window**, **Screen**, and **iPhone**
 (when one is cabled). It opens on the mode you used last:

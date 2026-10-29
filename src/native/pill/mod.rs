@@ -1,7 +1,8 @@
 //! Native AppKit `NSPanel` + `CAMetalLayer` + Metal renderer for the Scrawl recording pill.
 //!
 //! Replaces the GPUI `HudPillWindow` with a single fixed-size `NSPanel` (`640 × 84 pt` at `y = 34`
-//! below the menu bar) that never resizes or moves during morphs. Supports two backdrop looks via
+//! below the menu bar) that never resizes during morphs; it moves only when the capsule is dragged
+//! or has to stay on screen (`place`). Supports two backdrop looks via
 //! `pillStyle: "black" | "glass"`:
 //! - `"black"`: Analytic SDF rounded-rect silhouette + shadow + specular border in Metal.
 //! - `"glass"`: AppKit's `NSGlassEffectView` (inside `NSGlassEffectContainerView`) driven on the
@@ -9,6 +10,7 @@
 
 pub mod atlas;
 pub mod model;
+mod place;
 mod types;
 
 pub use self::types::{PillAction, PillSnapshot, PillStyle};
@@ -38,6 +40,7 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::{CALayer, CATransaction};
 
 use self::atlas::{GlyphAtlas, IconKind};
+use self::place::Place;
 use self::model::{
     CHIP_H, CHIP_PX, ElemId, FrameState, PANEL_H, PANEL_W, PillModel, Pres,
 };
@@ -286,6 +289,18 @@ struct PillRuntimeState {
     press_down_elem: Option<ElemId>,
     paste_drag_start_screen: Option<[f32; 2]>,
     action_tx: flume::Sender<PillAction>,
+    place: Place,
+    drag: Option<Drag>,
+}
+
+/// A press on the capsule, which becomes a drag of it once it moves `place::DRAG_SLOP`.
+#[derive(Clone, Copy)]
+struct Drag {
+    /// The pointer at the press, global points.
+    grab: [f32; 2],
+    /// The panel's top-left at the press.
+    from: [f32; 2],
+    moving: bool,
 }
 
 // Accessed only on the main thread (guarded by `MainThreadMarker::new()` in `tick_main`).
@@ -315,8 +330,9 @@ impl NativePill {
             .iter()
             .map(|s| s.scale as f32)
             .fold(2.0_f32, f32::max);
-        let [top_left_x, top_left_y] = panel_origin(&screens, crate::screens::pointer())
+        let place = home_on(&screens, crate::screens::pointer())
             .ok_or("No screen available for NativePill")?;
+        let [top_left_x, top_left_y] = place.home;
         let panel_rect = panel_appkit_rect(mtm, [top_left_x, top_left_y]);
 
         let pipelines = MetalPipelines::new(scale)?;
@@ -401,6 +417,8 @@ impl NativePill {
                 press_down_elem: None,
                 paste_drag_start_screen: None,
                 action_tx,
+                place,
+                drag: None,
             }),
             tick_queued: AtomicBool::new(false),
             alive: AtomicBool::new(true),
@@ -443,34 +461,23 @@ impl NativePill {
     }
 
     /// Moves the capsule to the screen holding `point` (global points, top-left origin), below
-    /// that screen's menu bar and notch. A no-op when it's already there.
+    /// that screen's menu bar and notch, or where it was dragged to (`place`). A no-op when it's
+    /// already there.
     pub fn place_on(&self, point: [f64; 2]) {
-        let Some(mtm) = MainThreadMarker::new() else {
-            return;
-        };
         let screens = crate::screens::current();
-        let Some(origin) = panel_origin(&screens, Some(point)) else {
+        let Some(home) = home_on(&screens, Some(point)) else {
             return;
         };
         let Ok(mut st) = self.shared.state.lock() else {
             return;
         };
-        if (st.screen_origin_top_left[0] - origin[0]).abs() < 0.5
-            && (st.screen_origin_top_left[1] - origin[1]).abs() < 0.5
-        {
+        st.place.home = home.home;
+        st.place.visible = home.visible;
+        if st.drag.is_some_and(|d| d.moving) {
             return;
         }
-        st.screen_origin_top_left = origin;
-        st.window
-            .setFrame_display(panel_appkit_rect(mtm, origin), true);
-        // On a 1x screen AppKit resets the layer's contentsScale; keep the scale it's drawn at.
-        let scale = st.pipelines.scale;
-        st.pipelines.layer.set_contents_scale(f64::from(scale));
-        st.pipelines.layer.set_drawable_size(CGSize::new(
-            f64::from(PANEL_W * scale),
-            f64::from(PANEL_H * scale),
-        ));
-        st.dirty = true;
+        let origin = st.place.origin(&st.capsule());
+        st.move_to(origin);
     }
 
     /// Synchronizes coordinator state into the native pill model; the next `CVDisplayLink` tick
@@ -556,17 +563,22 @@ impl Drop for NativePill {
     }
 }
 
-/// The panel's top-left (global points) on the screen holding `point`, else the primary one.
-fn panel_origin(screens: &[crate::screens::Screen], point: Option<[f64; 2]>) -> Option<[f32; 2]> {
+/// The panel's home (global points) on the screen holding `point`, else the primary one.
+fn home_on(screens: &[crate::screens::Screen], point: Option<[f64; 2]>) -> Option<Place> {
     let index = point
         .and_then(|p| crate::screens::index_at(screens, p))
         .or(if screens.is_empty() { None } else { Some(0) })?;
+    let screen = &screens[index];
     let [x, y] = crate::screens::pill_origin(
-        &screens[index],
+        screen,
         f64::from(PANEL_W),
         f64::from(model::PANEL_Y),
     );
-    Some([x as f32, y as f32])
+    Some(Place {
+        visible: screen.visible.map(|v| v as f32),
+        home: [x as f32, y as f32],
+        offset: [0.0, 0.0],
+    })
 }
 
 /// The panel's AppKit frame for a top-left origin in global points.
@@ -684,6 +696,7 @@ impl SharedNativePill {
         }
         st.last_tick_now = now;
         let dt = raw_dt.min(0.025 * motion::time_scale());
+        st.settle_place(raw_dt);
 
         let animating = !st.model.is_at_rest()
             || matches!(st.model.pres, Pres::Processing);
@@ -733,8 +746,10 @@ impl PillRuntimeState {
             self.screen_origin_top_left[1] + local_y,
         ];
 
+        let moving = self.drag.is_some_and(|d| d.moving);
         let inside_island = self.model.hit_island(local_x, local_y);
-        let should_ignore = !inside_island && self.press_down_elem.is_none();
+        let should_ignore =
+            !inside_island && self.press_down_elem.is_none() && self.drag.is_none();
         if self.ignores_mouse != should_ignore {
             self.ignores_mouse = should_ignore;
             self.window.setIgnoresMouseEvents(should_ignore);
@@ -742,7 +757,7 @@ impl PillRuntimeState {
 
         let prev_hover = self.model.hovered;
         let prev_press = self.model.pressed;
-        let pos_opt = inside_island.then_some([local_x, local_y]);
+        let pos_opt = (inside_island && !moving).then_some([local_x, local_y]);
         self.model.set_pointer(pos_opt, mouse_down);
         if self.model.hovered != prev_hover || self.model.pressed != prev_press {
             self.dirty = true;
@@ -756,7 +771,18 @@ impl PillRuntimeState {
             } else {
                 self.paste_drag_start_screen = None;
             }
+            // Anywhere else on the capsule, a press that moves drags it.
+            self.drag = (inside_island && hit != Some(ElemId::Paste)).then_some(Drag {
+                grab: screen_pt,
+                from: self.screen_origin_top_left,
+                moving: false,
+            });
+        } else if mouse_down {
+            self.drag_capsule(screen_pt);
         } else if !mouse_down && self.was_mouse_down {
+            if self.drag.take().is_some_and(|d| d.moving) {
+                self.place.drop_at(self.screen_origin_top_left);
+            }
             if let Some(down_elem) = self.press_down_elem.take() {
                 let up_elem = pos_opt.and_then(|[x, y]| self.model.hit_element(x, y));
                 if down_elem == ElemId::Paste {
@@ -775,6 +801,78 @@ impl PillRuntimeState {
             self.paste_drag_start_screen = None;
         }
         self.was_mouse_down = mouse_down;
+    }
+
+    /// With the button still down after a press on the capsule: once it has moved
+    /// `place::DRAG_SLOP` the press is a drag (no click), and the panel follows the pointer,
+    /// kept on screen.
+    fn drag_capsule(&mut self, pointer: [f32; 2]) {
+        let Some(mut drag) = self.drag else {
+            return;
+        };
+        let [dx, dy] = [pointer[0] - drag.grab[0], pointer[1] - drag.grab[1]];
+        if !drag.moving {
+            if dx.hypot(dy) < place::DRAG_SLOP {
+                return;
+            }
+            drag.moving = true;
+            self.drag = Some(drag);
+            self.press_down_elem = None;
+            self.paste_drag_start_screen = None;
+            self.model.cancel_press();
+            self.dirty = true;
+        }
+        let origin = self
+            .place
+            .inside([drag.from[0] + dx, drag.from[1] + dy], &self.capsule());
+        self.move_to(origin);
+    }
+
+    /// When the capsule grows past the edge of the screen, or after a drop near home, the panel
+    /// glides to where it belongs.
+    fn settle_place(&mut self, dt: f32) {
+        if self.drag.is_some_and(|d| d.moving) || self.model.is_fully_hidden() {
+            return;
+        }
+        let want = self.place.origin(&self.capsule());
+        let [x, y] = self.screen_origin_top_left;
+        let [dx, dy] = [want[0] - x, want[1] - y];
+        if dx.abs() < 0.5 && dy.abs() < 0.5 {
+            self.move_to(want);
+            return;
+        }
+        let k = 1.0 - (-dt / 0.06).exp();
+        self.move_to([x + dx * k, y + dy * k]);
+    }
+
+    /// The capsule's resting bounds in the panel for what it shows now.
+    fn capsule(&self) -> model::Layout {
+        let m = &self.model;
+        model::layout_of(&m.pres, &m.clock, m.labels, &m.metrics).0
+    }
+
+    /// Moves the panel so its top-left is at `origin` (global points).
+    fn move_to(&mut self, origin: [f32; 2]) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let [x, y] = self.screen_origin_top_left;
+        if (x - origin[0]).abs() < 0.01 && (y - origin[1]).abs() < 0.01 {
+            return;
+        }
+        self.screen_origin_top_left = origin;
+        self.window
+            .setFrame_display(panel_appkit_rect(mtm, origin), true);
+        // On a 1x screen AppKit resets the layer's contentsScale; keep the scale it's drawn at.
+        let scale = self.pipelines.scale;
+        if self.pipelines.layer.contents_scale() != f64::from(scale) {
+            self.pipelines.layer.set_contents_scale(f64::from(scale));
+            self.pipelines.layer.set_drawable_size(CGSize::new(
+                f64::from(PANEL_W * scale),
+                f64::from(PANEL_H * scale),
+            ));
+        }
+        self.dirty = true;
     }
 
     fn dispatch_click(&self, elem: ElemId) {

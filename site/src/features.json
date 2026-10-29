@@ -161,6 +161,17 @@
       "docs": ["docs/motion.md"]
     },
     {
+      "id": "move-capsule",
+      "group": "record",
+      "name": "Move the capsule",
+      "says": "Drag the capsule out of the way; it stays there for later captures, and dropping it near the top centre puts it back.",
+      "status": "main",
+      "platforms": ["mac"],
+      "added": "2026-10-29",
+      "note": "The Metal capsule only. It's kept on screen whatever it grows to.",
+      "docs": ["README.md#capture-controls", "docs/capture.md"]
+    },
+    {
       "id": "hidden-windows",
       "group": "record",
       "name": "Own windows left out",

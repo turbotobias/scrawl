@@ -1115,6 +1115,13 @@ impl PillModel {
         }
     }
 
+    /// Lets go of a press without the tap's squish (it became a drag of the capsule).
+    pub fn cancel_press(&mut self) {
+        self.hovered = None;
+        self.pressed = None;
+        self.press.to(0.0, PRESS_SPRING);
+    }
+
     /// Hit-tests against the model's target capsule shape (`hitIsland` in `island/model.js`),
     /// plus a `6 pt` slop margin so reaching for chips keeps mouse events enabled.
     pub fn hit_island(&self, x: f32, y: f32) -> bool {
