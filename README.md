@@ -898,6 +898,11 @@ taskpolicy -c utility cargo test -j 3 --offline -- --test-threads=2
 ./scripts/install-app.sh
 ```
 
+`install-app.sh` signs with Kit's Developer ID when it's in the keychain, else `SCRAWL_SIGN_ID`, else
+your own Apple Development certificate (Xcode makes one), else ad hoc. Any certificate keeps Screen
+Recording, Microphone and Accessibility across rebuilds; an ad-hoc build asks for them again each
+time. The first signed build may show a keychain prompt for `codesign`: Always Allow.
+
 On Windows, `cargo test`; then run `scrawl.exe app` and record with `Alt+Shift+S`.
 `SCRAWL_SHOW_OWN_WINDOWS=1` keeps Scrawl's own windows (capsule, overlay, picker) in screenshots,
 which normally leave them out.

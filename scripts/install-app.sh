@@ -90,10 +90,23 @@ cat > "${CONTENTS_DIR}/Info.plist" <<PLIST
 </plist>
 PLIST
 
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "${SIGN_ID}"; then
+# Kit's Developer ID, else SCRAWL_SIGN_ID, else your own Apple Development certificate (by hash:
+# an expired one can share its name), else ad hoc. A certificate keeps Screen Recording, Microphone
+# and Accessibility across rebuilds; an ad-hoc signature is new every build, so macOS asks again.
+# The first build signed with a certificate may show a keychain prompt: Always Allow.
+VALID_IDS="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+if [[ -n "${SCRAWL_SIGN_ID:-}" ]]; then
+  IDENTITY="${SCRAWL_SIGN_ID}"
+elif grep -q "${SIGN_ID}" <<<"${VALID_IDS}"; then
   IDENTITY="${SIGN_ID}"
 else
-  IDENTITY="-"
+  IDENTITY="$(awk '/"Apple Development: /{ print $2; exit }' <<<"${VALID_IDS}")"
+  IDENTITY="${IDENTITY:--}"
+fi
+if [[ "${IDENTITY}" == "-" ]]; then
+  echo "Signing ad hoc: macOS will ask for its permissions again after each install" >&2
+else
+  echo "Signing with $(grep -m1 -F "${IDENTITY}" <<<"${VALID_IDS}" | sed 's/^ *[0-9]*) //' || echo "${IDENTITY}")" >&2
 fi
 if [[ -d "${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B" ]]; then
   SPARKLE_VER="${FRAMEWORKS_DIR}/Sparkle.framework/Versions/B"
