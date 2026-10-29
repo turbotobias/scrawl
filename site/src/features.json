@@ -170,6 +170,14 @@
       "added": "2026-10-29",
       "note": "The Metal capsule only. It's kept on screen whatever it grows to.",
       "docs": ["README.md#capture-controls", "docs/capture.md"]
+      "id": "no-sound-warning",
+      "group": "record",
+      "name": "No-sound warning",
+      "says": "When the microphone gave nothing, or gave out partway, the finished capsule says \"Copied · no sound\" and the summary says why there's no transcript.",
+      "status": "main",
+      "platforms": ["mac", "windows", "linux"],
+      "added": "2026-10-29",
+      "docs": ["README.md#settings"]
     },
     {
       "id": "hidden-windows",
