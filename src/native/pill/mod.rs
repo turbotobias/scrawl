@@ -330,8 +330,9 @@ impl NativePill {
             .iter()
             .map(|s| s.scale as f32)
             .fold(2.0_f32, f32::max);
-        let place = home_on(&screens, crate::screens::pointer())
+        let mut place = home_on(&screens, crate::screens::pointer())
             .ok_or("No screen available for NativePill")?;
+        place.offset = place::saved_offset();
         let [top_left_x, top_left_y] = place.home;
         let panel_rect = panel_appkit_rect(mtm, [top_left_x, top_left_y]);
 
@@ -782,6 +783,7 @@ impl PillRuntimeState {
         } else if !mouse_down && self.was_mouse_down {
             if self.drag.take().is_some_and(|d| d.moving) {
                 self.place.drop_at(self.screen_origin_top_left);
+                place::save_offset(self.place.offset);
             }
             if let Some(down_elem) = self.press_down_elem.take() {
                 let up_elem = pos_opt.and_then(|[x, y]| self.model.hit_element(x, y));

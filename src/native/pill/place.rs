@@ -1,8 +1,10 @@
 //! Where the panel sits on its display. Home is `PANEL_Y` below the top, centred
 //! (`screens::pill_origin`); dragging the capsule moves it from there. The drag is kept as an
-//! offset from home, so it carries to the next capture and to other displays, and the capsule is
-//! always kept inside the display's visible frame (below the menu bar, clear of the Dock),
-//! whatever size it grows to.
+//! offset from home, so it carries to the next capture and to other displays (and, saved in
+//! `capsule-offset` beside the captures, across restarts), and the capsule is always kept inside
+//! the display's visible frame (below the menu bar, clear of the Dock), whatever size it grows to.
+
+use std::path::PathBuf;
 
 use super::model::Layout;
 
@@ -67,6 +69,40 @@ impl Place {
     }
 }
 
+/// Beside the captures, as `last-mode` is.
+fn saved_path() -> Option<PathBuf> {
+    crate::handoff::builtin_captures_dir()
+        .parent()
+        .map(|dir| dir.join("capsule-offset"))
+}
+
+/// The offset a drag left last time Scrawl ran, else none.
+pub fn saved_offset() -> [f32; 2] {
+    saved_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| parse(&text))
+        .unwrap_or_default()
+}
+
+/// Keeps `offset` for the next launch; home needs no file.
+pub fn save_offset(offset: [f32; 2]) {
+    let Some(path) = saved_path() else {
+        return;
+    };
+    let _ = if offset == [0.0, 0.0] {
+        std::fs::remove_file(path)
+    } else {
+        std::fs::write(path, format!("{} {}", offset[0], offset[1]))
+    };
+}
+
+fn parse(text: &str) -> Option<[f32; 2]> {
+    let mut parts = text.split_whitespace().map(str::parse::<f32>);
+    let offset = [parts.next()?.ok()?, parts.next()?.ok()?];
+    (parts.next().is_none() && offset.iter().all(|v| v.is_finite() && v.abs() < 100_000.0))
+        .then_some(offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +159,15 @@ mod tests {
         let [x, y] = p.origin(&c);
         assert!((x + c.l - MARGIN).abs() < 0.01);
         assert!((y + c.t - (37.0 + MARGIN)).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_saved_offset_reads_back_and_junk_is_ignored() {
+        assert_eq!(parse("200 -480"), Some([200.0, -480.0]));
+        assert_eq!(parse(" 12.5\t7\n"), Some([12.5, 7.0]));
+        for junk in ["", "200", "200 x", "1 2 3", "NaN 0", "inf 0", "1e9 0"] {
+            assert_eq!(parse(junk), None, "{junk:?}");
+        }
     }
 
     #[test]
