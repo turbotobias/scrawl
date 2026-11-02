@@ -19,6 +19,14 @@ chmod +x "${REPO_DIR}/scripts/setup-sparkle.sh" "${REPO_DIR}/scripts/release-app
 SPARKLE_DIR="$("${REPO_DIR}/scripts/setup-sparkle.sh" 2>/dev/null || true)"
 taskpolicy -c utility cargo build -j 3
 
+# The certificate the installed app is signed with, read before the new binaries replace it.
+PREV_ID=""
+CERTS="$(mktemp -d)"
+if codesign -d --extract-certificates="${CERTS}/cert" "${APP_DIR}" 2>/dev/null && [[ -f "${CERTS}/cert0" ]]; then
+  PREV_ID="$(shasum -a 1 "${CERTS}/cert0" | awk '{ print toupper($1) }')"
+fi
+rm -rf "${CERTS}"
+
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${FRAMEWORKS_DIR}" "${HOME}/bin"
 
 rm -f "${MACOS_DIR}/scrawl" "${MACOS_DIR}/scrawl-helper"
@@ -90,7 +98,8 @@ cat > "${CONTENTS_DIR}/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Kit's Developer ID, else SCRAWL_SIGN_ID, else your own Apple Development certificate (by hash:
+# SCRAWL_SIGN_ID, else Kit's Developer ID, else the certificate that signed the installed app (a new
+# one in the keychain would cost its grants), else your own Apple Development certificate (by hash:
 # an expired one can share its name), else ad hoc. A certificate keeps Screen Recording, Microphone
 # and Accessibility across rebuilds; an ad-hoc signature is new every build, so macOS asks again.
 # The first build signed with a certificate may show a keychain prompt: Always Allow.
@@ -99,6 +108,8 @@ if [[ -n "${SCRAWL_SIGN_ID:-}" ]]; then
   IDENTITY="${SCRAWL_SIGN_ID}"
 elif grep -q "${SIGN_ID}" <<<"${VALID_IDS}"; then
   IDENTITY="${SIGN_ID}"
+elif [[ -n "${PREV_ID}" ]] && grep -q "${PREV_ID}" <<<"${VALID_IDS}"; then
+  IDENTITY="${PREV_ID}"
 else
   IDENTITY="$(awk '/"Apple Development: /{ print $2; exit }' <<<"${VALID_IDS}")"
   IDENTITY="${IDENTITY:--}"

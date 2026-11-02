@@ -898,8 +898,9 @@ taskpolicy -c utility cargo test -j 3 --offline -- --test-threads=2
 ./scripts/install-app.sh
 ```
 
-`install-app.sh` signs with Kit's Developer ID when it's in the keychain, else `SCRAWL_SIGN_ID`, else
-your own Apple Development certificate (Xcode makes one), else ad hoc. Any certificate keeps Screen
+`install-app.sh` signs with `SCRAWL_SIGN_ID` when it's set, else Kit's Developer ID when it's in the
+keychain, else the certificate already on the installed app, else your own Apple Development
+certificate (Xcode makes one), else ad hoc. Any certificate keeps Screen
 Recording, Microphone and Accessibility across rebuilds; an ad-hoc build asks for them again each
 time. The first signed build may show a keychain prompt for `codesign`: Always Allow.
 
