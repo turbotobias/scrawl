@@ -4240,17 +4240,12 @@ impl Render for TargetPickerWindow {
                     }
                     SelectionMode::Screen => {}
                     SelectionMode::Window => {
-                        let found = coord
-                            .selectable_windows
-                            .iter()
-                            .find(|w| {
-                                let f = w.frame;
-                                f64::from(sx) >= f.x
-                                    && f64::from(sx) <= f.x + f.width
-                                    && f64::from(sy) >= f.y
-                                    && f64::from(sy) <= f.y + f.height
-                            })
-                            .cloned();
+                        let found = selectable_window_at(
+                            &coord.selectable_windows,
+                            f64::from(sx),
+                            f64::from(sy),
+                        )
+                        .cloned();
                         if coord.hovered_window.as_ref().and_then(|w| w.window_id)
                             != found.as_ref().and_then(|w| w.window_id)
                         {

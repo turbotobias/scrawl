@@ -491,6 +491,28 @@ pub fn pick_display(
         .unwrap_or(0)
 }
 
+/// Puts the picker's windows in the window server's front-to-back order (`raw`), so the first one
+/// under the pointer is the one on top. ScreenCaptureKit's array has no such order, so the picker
+/// could pick a window behind the one in front. Windows `raw` doesn't show (on another Space) are
+/// left out; an empty `raw` (the query failed) keeps the list as it is.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn in_stacking_order(
+    mut windows: Vec<TargetInfo>,
+    raw: &[crate::windows::RawWindow],
+) -> Vec<TargetInfo> {
+    if raw.is_empty() {
+        return windows;
+    }
+    let depth = |w: &TargetInfo| {
+        w.window_id
+            .and_then(|id| raw.iter().position(|r| r.id == id))
+    };
+    windows.retain(|w| depth(w).is_some());
+    windows.sort_by_cached_key(depth);
+    windows
+}
+
+/// The topmost window under a global point, with `windows` front to back.
 pub fn selectable_window_at(windows: &[TargetInfo], x: f64, y: f64) -> Option<&TargetInfo> {
     windows.iter().find(|window| {
         let f = window.frame;
@@ -2104,5 +2126,47 @@ mod tests {
         );
         assert!(selectable_window_at(&windows, -101.0, 50.0).is_none());
         assert!(selectable_window_at(&[], 0.0, 0.0).is_none());
+    }
+
+    #[test]
+    fn the_picker_takes_the_window_on_top_not_the_first_screencapturekit_lists() {
+        let window = |id: u32| TargetInfo {
+            mode: CaptureMode::Window,
+            app: Some(format!("App {id}")),
+            bundle_id: None,
+            window_title: None,
+            window_id: Some(id),
+            display_id: 1,
+            frame: TargetFrame {
+                x: 0.0,
+                y: 0.0,
+                width: 1440.0,
+                height: 900.0,
+                scale: 2.0,
+            },
+        };
+        let raw = |id: u32| crate::windows::RawWindow {
+            id,
+            pid: id as i32,
+            owner: String::new(),
+            title: String::new(),
+            bounds: [0.0, 0.0, 1440.0, 900.0],
+            layer: 0,
+            alpha: 1.0,
+        };
+        // A full-screen Safari (7) in front of Claude (3); window 9 is on another Space.
+        let listed = vec![window(3), window(9), window(7)];
+        let ordered = in_stacking_order(listed.clone(), &[raw(7), raw(3)]);
+        let ids: Vec<_> = ordered.iter().filter_map(|w| w.window_id).collect();
+        assert_eq!(ids, [7, 3]);
+        assert_eq!(
+            selectable_window_at(&ordered, 700.0, 400.0).and_then(|w| w.window_id),
+            Some(7)
+        );
+        assert_eq!(
+            in_stacking_order(listed, &[]).len(),
+            3,
+            "no window list: keep them all"
+        );
     }
 }
