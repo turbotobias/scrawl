@@ -886,7 +886,7 @@ fn display_of(screens: &[crate::screens::Screen], rect: [f64; 4]) -> (u32, f64) 
     )
 }
 
-/// Lists all on-screen normal (`window_layer == 0`) windows in front-to-back order for the Window picker.
+/// Lists the on-screen normal (`window_layer == 0`) windows, front to back, for the Window picker.
 pub fn list_selectable_windows() -> Vec<TargetInfo> {
     let Ok(content) = SCShareableContent::get() else {
         return Vec::new();
@@ -894,7 +894,7 @@ pub fn list_selectable_windows() -> Vec<TargetInfo> {
     let our_pid = std::process::id() as i32;
     let screens = crate::screens::displays();
 
-    content
+    let windows = content
         .windows()
         .into_iter()
         .filter(|w| {
@@ -925,7 +925,8 @@ pub fn list_selectable_windows() -> Vec<TargetInfo> {
                 frame: crate::screens::with_scale(rect, scale),
             }
         })
-        .collect()
+        .collect();
+    super::in_stacking_order(windows, &raw_windows_now())
 }
 
 static LAST_EXTERNAL_APP_PID: AtomicI32 = AtomicI32::new(0);
