@@ -114,6 +114,21 @@
       "docs": ["README.md#capture-controls"]
     },
     {
+      "id": "shape-tools",
+      "group": "record",
+      "name": "Lines, arrows and boxes",
+      "says": "Pick a line, arrow or box in the recording capsule or with ⌥⇧1–4; ⇧ + move then draws it, ⌘ snaps it to 45° or a square and ⌥ draws it from the centre.",
+      "status": "experiment:shapeTools",
+      "platforms": ["mac"],
+      "added": "2026-11-10",
+      "shortcuts": [
+        { "keys": "⌥⇧1–4", "does": "Choose the pen, line, arrow or box while recording" },
+        { "keys": "⌘ while drawing", "does": "Snap to 45° or a square" },
+        { "keys": "⌥ while drawing", "does": "Draw from the centre" }
+      ],
+      "docs": ["README.md#capture-controls", "docs/capture.md", "docs/keyframes-and-text.md"]
+    },
+    {
       "id": "pins",
       "group": "record",
       "name": "Pins",

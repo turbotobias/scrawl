@@ -220,6 +220,12 @@ Preview every pane, dark and light, with the recorder listening and a combinatio
 - `⌥⇧V`: Paste both `contact-sheet.png` and `summary.md` into the active app or terminal (`⌃⌥⇧V` also works while it's the default)
 - **Normal pointer**: Clicks and scrolls pass straight through to the app underneath
 - **Hold `⇧` (Shift) + move**: Draw a persistent red marker stroke (`#ff3b30`) on screen that fades out after release
+- **Lines, arrows and boxes** (experiment `shapeTools`): while recording, the capsule shows a pen,
+  a line, an arrow and a box. Click one, or press `⌥⇧1`–`⌥⇧4` (the record shortcut's modifiers
+  with 1–4; the chosen one again goes back to the pen). `⇧` + move then draws that shape from where
+  `⇧` went down; add `⌘` to snap lines and arrows to 45° and boxes to squares, and `⌥` to draw from
+  the centre. Each recording starts with the pen. The shortcuts are only taken while recording, and
+  macOS hands them to Scrawl alone, so they never type into the app you're showing
 - **`⇧`-click**: Drop a numbered pin where you click (a press that moves under 12 pt and lets go within 1 s; longer is ink). It shows as a brief red pulse, not a lasting dot, and lands on the keyframes. A click after you've drawn in the same `⇧` hold is part of the drawing and drops no pin
 - **`⌘Z`**: Undo the last stroke
 - **`Esc`**: Cancel the active selection or capture

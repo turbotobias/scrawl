@@ -5,6 +5,12 @@
 
 use crate::model::Tool;
 
+/// Whether the shape tools show while recording: the `shapeTools` experiment, on macOS (their
+/// buttons are the native capsule's).
+pub fn wanted() -> bool {
+    cfg!(target_os = "macos") && crate::handoff::experiment("shapeTools")
+}
+
 /// Modifiers held with ⇧ while a shape is drawn (⇧ itself is the drawing key).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mods {
@@ -54,7 +60,11 @@ pub fn ends(tool: Tool, anchor: [f32; 2], pointer: [f32; 2], mods: Mods) -> ([f3
 pub fn outline(tool: Tool, from: [f32; 2], to: [f32; 2]) -> Vec<[f32; 2]> {
     let corners = match tool {
         Tool::Line => vec![from, to],
-        Tool::Rect => vec![from, [to[0], from[1]], to, [from[0], to[1]], from],
+        // From the middle of an edge, so the ink's start and end meet on a straight side.
+        Tool::Rect => {
+            let top = [(from[0] + to[0]) * 0.5, from[1]];
+            vec![top, [to[0], from[1]], to, [from[0], to[1]], from, top]
+        }
         Tool::Arrow => {
             let len = distance(from, to);
             if len < 1.0 {

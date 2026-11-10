@@ -57,6 +57,8 @@ pub enum PillAction {
     DismissCompleted,
     /// A session chip on the Completed island (smart routing), by position.
     Route(usize),
+    /// A shape tool button while recording (`None`: the pen).
+    Tool(Option<crate::model::Tool>),
 }
 
 /// Coordinator state snapshot synced to `NativePill`.

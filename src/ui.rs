@@ -712,6 +712,8 @@ pub struct ScrawlCoordinator {
     windows_loading: bool,
     selection_pointer: Option<[f32; 2]>,
     hovered_window: Option<TargetInfo>,
+    /// The shape tools show in this recording's capsule (`shapes::wanted` when it started).
+    shape_tools: bool,
     animated_window_rect: Option<[f32; 4]>,
     selection_drag: Option<([f32; 2], [f32; 2])>,
     /// Global frame of the display the picker covers, highlighted in `SelectionMode::Screen`.
@@ -811,6 +813,7 @@ impl ScrawlCoordinator {
             windows_loading: false,
             selection_pointer: None,
             hovered_window: None,
+            shape_tools: false,
             animated_window_rect: None,
             selection_drag: None,
             display_rect: [0.0, 0.0, 1440.0, 900.0],
@@ -1677,6 +1680,18 @@ impl ScrawlCoordinator {
             ) => Some(Input::CaptureEnded { completed: false }),
             _ => None,
         };
+        // The shape tools and their shortcuts last as long as the recording.
+        match capture {
+            Some(Input::CaptureStarted) => {
+                self.shape_tools = crate::shapes::wanted();
+                crate::capture::set_tool_hotkeys(&self.telemetry, self.shape_tools);
+            }
+            Some(Input::CaptureEnded { .. }) if self.shape_tools => {
+                self.shape_tools = false;
+                crate::capture::set_tool_hotkeys(&self.telemetry, false);
+            }
+            _ => {}
+        }
         if let Some(input) = capture
             && let Some(session) = self.onboarding.as_mut()
         {
@@ -1877,6 +1892,10 @@ impl ScrawlCoordinator {
                 chips: self.reveal.is_open(),
                 has_iphone,
                 live: crate::live_audio::rows(),
+                tools: crate::native::pill::model::Tools {
+                    shown: self.shape_tools,
+                    chosen: self.telemetry.tool(),
+                },
             },
             IslandPhase::Processing => Pres::Processing,
             IslandPhase::Completed { inbox_count, .. } => Pres::Completed {
@@ -1917,7 +1936,18 @@ impl ScrawlCoordinator {
             PillAction::Inspect => self.inspect_completed_bundle(cx),
             PillAction::DismissCompleted => self.dismiss_completed_bundle(cx),
             PillAction::Route(index) => self.choose_route(index, cx),
+            PillAction::Tool(tool) => self.choose_tool(tool, cx),
         }
+    }
+
+    /// What ⇧ draws with for the rest of this recording (`None`: the pen).
+    fn choose_tool(&mut self, tool: Option<crate::model::Tool>, cx: &mut Context<Self>) {
+        if !self.is_recording() || !self.shape_tools {
+            return;
+        }
+        self.telemetry.set_tool(tool);
+        self.sync_native_pill();
+        cx.notify();
     }
 
     pub fn dismiss_island(&mut self, cx: &mut Context<Self>) {
@@ -5492,6 +5522,7 @@ pub fn run_app(
                             LiveOverlayEvent::UndoStroke => {
                                 coord.undo_stroke(cx);
                             }
+                            LiveOverlayEvent::Tool(tool) => coord.choose_tool(tool, cx),
                             LiveOverlayEvent::RequestSnapshot => {
                                 coord.request_immediate_frame();
                                 cx.notify();

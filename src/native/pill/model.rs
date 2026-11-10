@@ -15,6 +15,7 @@
 //!   `4 pt` blur in transit that clears before landing.
 
 pub use crate::live_audio::Rows;
+pub use crate::model::Tool;
 use crate::ui::SelectionMode;
 
 // ─── Geometry (pt in the fixed 640 × 84 panel) ──────────────────────────────────────────────
@@ -355,10 +356,15 @@ pub enum ElemId {
     /// What the microphone hears, and the words, while recording (`live_audio`).
     Wave = 17,
     Caption = 18,
+    /// The shape tools while recording (`shapeTools`): the pen, a line, an arrow, a box.
+    ToolPen = 19,
+    ToolLine = 20,
+    ToolArrow = 21,
+    ToolRect = 22,
 }
 
 impl ElemId {
-    pub const COUNT: usize = 19;
+    pub const COUNT: usize = 23;
     pub const ROUTES: [ElemId; 2] = [Self::Route0, Self::Route1];
     pub const ALL: [ElemId; Self::COUNT] = [
         Self::Lead,
@@ -380,6 +386,17 @@ impl ElemId {
         Self::Route1,
         Self::Wave,
         Self::Caption,
+        Self::ToolPen,
+        Self::ToolLine,
+        Self::ToolArrow,
+        Self::ToolRect,
+    ];
+    /// The tool buttons in order, with the tool each chooses (`None`: the pen).
+    pub const TOOLS: [(ElemId, Option<Tool>); 4] = [
+        (Self::ToolPen, None),
+        (Self::ToolLine, Some(Tool::Line)),
+        (Self::ToolArrow, Some(Tool::Arrow)),
+        (Self::ToolRect, Some(Tool::Rect)),
     ];
 
     pub const fn trace_key(self) -> &'static str {
@@ -403,6 +420,10 @@ impl ElemId {
             Self::Route1 => "route:1",
             Self::Wave => "wave",
             Self::Caption => "caption",
+            Self::ToolPen => "tool:pen",
+            Self::ToolLine => "tool:line",
+            Self::ToolArrow => "tool:arrow",
+            Self::ToolRect => "tool:box",
         }
     }
 
@@ -450,8 +471,20 @@ impl ElemId {
             Self::Route0 | Self::Route1 => "Send to session",
             Self::Wave => "Microphone level",
             Self::Caption => "Live transcript",
+            Self::ToolPen => "Pen",
+            Self::ToolLine => "Line",
+            Self::ToolArrow => "Arrow",
+            Self::ToolRect => "Box",
         }
     }
+}
+
+/// The shape tools while recording (`shapeTools`): whether their buttons show, and which is chosen
+/// (`None`: the pen).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tools {
+    pub shown: bool,
+    pub chosen: Option<Tool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -462,6 +495,7 @@ pub enum Pres {
         has_iphone: bool,
         /// The waveform and the words' row (`live_audio`).
         live: Rows,
+        tools: Tools,
     },
     Selecting {
         mode: SelectionMode,
@@ -486,13 +520,15 @@ impl Pres {
                     chips: a,
                     has_iphone: ia,
                     live: la,
+                    tools: ta,
                 },
                 Self::Recording {
                     chips: b,
                     has_iphone: ib,
                     live: lb,
+                    tools: tb,
                 },
-            ) => a == b && (ia == ib || !*a) && la == lb,
+            ) => a == b && (ia == ib || !*a) && la == lb && ta.shown == tb.shown,
             (
                 Self::Selecting {
                     mode: ma,
@@ -675,6 +711,7 @@ pub fn layout_of(
             chips,
             has_iphone,
             live,
+            tools,
         } => {
             let clock_w = m.clock_width(clock);
             let lead_w = CHIP_H + clock_w + LEAD_TRAIL;
@@ -696,6 +733,13 @@ pub fn layout_of(
                 raw.push((ElemId::DividerClose, DIVIDER_W, 0.0, 0.0, false));
                 raw.push((ElemId::Close, CHIP_H, CHIP_CORE_ROUND, 0.0, true));
             } else {
+                if tools.shown {
+                    for (id, tool) in ElemId::TOOLS {
+                        let chosen = f32::from(u8::from(tools.chosen == tool));
+                        raw.push((id, CHIP_H, CHIP_CORE_ROUND, chosen, true));
+                    }
+                    raw.push((ElemId::DividerClose, DIVIDER_W, 0.0, 0.0, false));
+                }
                 raw.push((
                     ElemId::Cancel,
                     Metrics::chip_width(m.cancel),
@@ -1768,6 +1812,7 @@ mod tests {
                         chips: true,
                         has_iphone: false,
                         live: Rows::default(),
+                        tools: Tools::default(),
                     },
                 ),
                 (
@@ -1787,6 +1832,7 @@ mod tests {
                         chips: true,
                         has_iphone: false,
                         live: Rows::default(),
+                        tools: Tools::default(),
                     },
                 ),
                 (
@@ -1806,6 +1852,7 @@ mod tests {
                         chips: true,
                         has_iphone: false,
                         live: Rows::default(),
+                        tools: Tools::default(),
                     },
                 ),
                 (
@@ -1814,6 +1861,7 @@ mod tests {
                         chips: false,
                         has_iphone: false,
                         live: Rows::default(),
+                        tools: Tools::default(),
                     },
                 ),
                 (2.4, Pres::Hidden),
@@ -1847,6 +1895,7 @@ mod tests {
                         chips: false,
                         has_iphone: false,
                         live: Rows::default(),
+                        tools: Tools::default(),
                     },
                 ),
                 (3.9, Pres::Hidden),
@@ -1859,6 +1908,7 @@ mod tests {
                         chips: true,
                         has_iphone: false,
                         live: Rows::default(),
+                        tools: Tools::default(),
                     },
                 ),
                 (
@@ -1867,6 +1917,7 @@ mod tests {
                         chips: false,
                         has_iphone: false,
                         live: Rows::default(),
+                        tools: Tools::default(),
                     },
                 ),
                 (2.0, Pres::Processing),
@@ -1911,6 +1962,7 @@ mod tests {
             chips: true,
             has_iphone: false,
             live: Rows::default(),
+            tools: Tools::default(),
         });
         for _ in 0..8 {
             m.advance(FRAME_DT);
@@ -1943,11 +1995,13 @@ mod tests {
                 chips: true,
                 has_iphone: false,
                 live: Rows::default(),
+                tools: Tools::default(),
             },
             Pres::Recording {
                 chips: false,
                 has_iphone: false,
                 live: Rows::default(),
+                tools: Tools::default(),
             },
             Pres::Selecting {
                 mode: SelectionMode::Area,
@@ -2012,6 +2066,7 @@ mod tests {
             chips: true,
             has_iphone: false,
             live: Rows::default(),
+            tools: Tools::default(),
         });
         let mut saw_sharp_before_opaque = false;
         for _ in 0..120 {
@@ -2032,6 +2087,7 @@ mod tests {
             chips: false,
             has_iphone: false,
             live: Rows::default(),
+            tools: Tools::default(),
         });
         let mut peak_travel_blur = 0.0_f32;
         for _ in 0..120 {
@@ -2062,6 +2118,7 @@ mod tests {
             chips: true,
             has_iphone: false,
             live: Rows::default(),
+            tools: Tools::default(),
         });
         let target_w = m.r.target - m.l.target;
         m.advance(FRAME_DT);
@@ -2142,6 +2199,7 @@ mod tests {
             chips: true,
             has_iphone: false,
             live: Rows::default(),
+            tools: Tools::default(),
         });
         let target_w = m.r.target - m.l.target;
         let mut first: Vec<(ElemId, f32)> = Vec::new();
@@ -2176,6 +2234,7 @@ mod tests {
             chips: false,
             has_iphone: false,
             live: Rows::default(),
+            tools: Tools::default(),
         };
         let (layout, items) = layout_of(&pres, "0:00", LabelWidths::default(), &Metrics::default());
         let ids: Vec<ElemId> = items.iter().map(|i| i.id).collect();
@@ -2193,11 +2252,53 @@ mod tests {
     }
 
     #[test]
+    fn shape_tools_sit_between_the_timer_and_the_controls_and_show_the_chosen_one() {
+        let pres = |shown, chosen| Pres::Recording {
+            chips: false,
+            has_iphone: false,
+            live: Rows::default(),
+            tools: Tools { shown, chosen },
+        };
+        let m = Metrics::default();
+        let (_, items) = layout_of(
+            &pres(true, Some(Tool::Arrow)),
+            "0:00",
+            LabelWidths::default(),
+            &m,
+        );
+        let ids: Vec<ElemId> = items.iter().map(|i| i.id).collect();
+        assert_eq!(
+            ids,
+            [
+                ElemId::Lead,
+                ElemId::DividerLead,
+                ElemId::ToolPen,
+                ElemId::ToolLine,
+                ElemId::ToolArrow,
+                ElemId::ToolRect,
+                ElemId::DividerClose,
+                ElemId::Cancel,
+                ElemId::Finish
+            ]
+        );
+        let chosen: Vec<ElemId> = items
+            .iter()
+            .filter(|i| i.active > 0.5)
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(chosen, [ElemId::ToolArrow]);
+        // Choosing another tool only moves the highlight.
+        assert!(pres(true, None).same_layout(&pres(true, Some(Tool::Rect))));
+        assert!(!pres(true, None).same_layout(&pres(false, None)));
+    }
+
+    #[test]
     fn live_audio_adds_a_waveform_and_a_full_width_row_for_the_words() {
         let recording = |wave, caption| Pres::Recording {
             chips: false,
             has_iphone: false,
             live: Rows { wave, caption },
+            tools: Tools::default(),
         };
         let m = Metrics::default();
         let (plain, plain_items) =
@@ -2246,6 +2347,7 @@ mod tests {
                 wave: true,
                 caption,
             },
+            tools: Tools::default(),
         };
         m.set_pres(live(false));
         for _ in 0..90 {
@@ -2293,6 +2395,7 @@ mod tests {
             chips: true,
             has_iphone: false,
             live: Rows::default(),
+            tools: Tools::default(),
         });
         for _ in 0..60 {
             m.advance(FRAME_DT);

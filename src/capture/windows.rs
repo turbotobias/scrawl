@@ -1090,6 +1090,9 @@ fn run_key_poller(telemetry: Arc<SharedCaptureTelemetry>) {
     }
 }
 
+/// The tool shortcuts are macOS's for now (the tools' buttons are the native capsule's).
+pub fn set_tool_hotkeys(_telemetry: &SharedCaptureTelemetry, _on: bool) {}
+
 // MARK: Recording
 
 pub(super) fn run_sampler(sampler: Sampler) -> Option<PathBuf> {

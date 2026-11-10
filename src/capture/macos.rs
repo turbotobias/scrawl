@@ -22,7 +22,7 @@ use super::{
     ShortcutConfig, ShortcutKind, capture_size, clean_label, hotkey_combos, pick_display,
     poll_clicks, scrawl_log, track_shift_ink,
 };
-use crate::model::{CaptureMode, InteractionEvent, RgbaFrame, TargetInfo};
+use crate::model::{CaptureMode, InteractionEvent, RgbaFrame, TargetInfo, Tool};
 
 /// Recordings may hold up to twice a frame's size in points (Retina pixels).
 pub const MAX_CAPTURE_SCALE: f64 = 2.0;
@@ -106,6 +106,16 @@ const HOTKEY_SIG: u32 = u32::from_be_bytes(*b"SCRW");
 const HOTKEY_ID_TOGGLE: u32 = 1;
 const HOTKEY_ID_ALT1: u32 = 3;
 const HOTKEY_ID_PASTE_BASE: u32 = 100;
+const HOTKEY_ID_TOOL_BASE: u32 = 200;
+/// The tool shortcuts' keys (ANSI 1–4) and what each draws with (`None`: the pen).
+const TOOL_KEYS: [(u32, Option<Tool>); 4] = [
+    (18, None),
+    (19, Some(Tool::Line)),
+    (20, Some(Tool::Arrow)),
+    (21, Some(Tool::Rect)),
+];
+/// The tool shortcuts while a recording runs (`set_tool_hotkeys`).
+static TOOL_HOTKEYS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 #[repr(C, packed(2))]
 #[derive(Clone, Copy)]
@@ -391,7 +401,12 @@ unsafe extern "C" fn carbon_hotkey_handler(
     ));
     if status == 0 && sig == HOTKEY_SIG {
         let telemetry = unsafe { &*user_data.cast::<SharedCaptureTelemetry>() };
-        if id >= HOTKEY_ID_PASTE_BASE {
+        if let Some(&(_, tool)) = id
+            .checked_sub(HOTKEY_ID_TOOL_BASE)
+            .and_then(|i| TOOL_KEYS.get(i as usize))
+        {
+            telemetry.emit_tool_shortcut(tool);
+        } else if id >= HOTKEY_ID_PASTE_BASE {
             telemetry.emit_paste_shortcut();
         } else {
             telemetry.emit_capture_shortcut();
@@ -455,6 +470,50 @@ pub fn install_global_hotkeys(telemetry: &Arc<SharedCaptureTelemetry>) {
         scrawl_log(format!(
             "install_global_hotkeys: {kind:?} shortcut could not be registered"
         ));
+    }
+}
+
+/// Registers the tool shortcuts (the record shortcut's modifiers with 1–4, `tool_modifiers`) while
+/// `on`, and removes them otherwise. Only while recording: macOS hands a registered hotkey to Scrawl
+/// alone, so the app being shown never sees those keys, and no other time are they taken.
+pub fn set_tool_hotkeys(telemetry: &SharedCaptureTelemetry, on: bool) {
+    let mut refs = TOOL_HOTKEYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for r in refs.drain(..) {
+        unsafe { UnregisterEventHotKey(r as *mut c_void) };
+    }
+    if !on {
+        return;
+    }
+    let (record, _) = telemetry.shortcuts();
+    let mods = super::tool_modifiers(record.carbon_modifiers);
+    let target = hotkey_target();
+    for (i, &(code, _)) in TOOL_KEYS.iter().enumerate() {
+        if (record.key_code, record.carbon_modifiers) == (code, mods) {
+            continue;
+        }
+        let mut r: *mut c_void = ptr::null_mut();
+        let rc = unsafe {
+            RegisterEventHotKey(
+                code,
+                mods,
+                EventHotKeyID {
+                    signature: HOTKEY_SIG,
+                    id: HOTKEY_ID_TOOL_BASE + i as u32,
+                },
+                target,
+                0,
+                &raw mut r,
+            )
+        };
+        if rc == 0 && !r.is_null() {
+            refs.push(r as usize);
+        } else {
+            scrawl_log(format!(
+                "Tool shortcut {code} could not be registered: rc={rc}"
+            ));
+        }
     }
 }
 

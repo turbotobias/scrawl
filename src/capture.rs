@@ -125,6 +125,8 @@ pub enum LiveOverlayEvent {
     CaptureShortcut,
     PasteLatestShortcut,
     UndoStroke,
+    /// A shape tool to draw with (`None`: the pen), from a tool shortcut while recording.
+    Tool(Option<Tool>),
     RequestSnapshot,
     /// The iPhone mirror ended on its own (unplugged, never found, or access denied).
     PhoneEnded,
@@ -435,6 +437,19 @@ pub fn layout_default_keycode(kind: ShortcutKind) -> u16 {
 
 /// The key codes and Carbon modifiers `cfg` registers: itself, plus for a default its aliases
 /// (⌃⌥⇧, ⌘⌥⇧, ⌃⌥⌘) on the active layout's key and the ANSI one.
+/// The tool shortcuts' modifiers: the record shortcut's (⌥⇧ by default, so ⌥⇧1–4), or ⌥⇧ when
+/// those are ⇧ alone or none, which would take typing.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn tool_modifiers(record: u32) -> u32 {
+    let mods =
+        record & (CARBON_CMD_KEY | CARBON_CONTROL_KEY | CARBON_OPTION_KEY | CARBON_SHIFT_KEY);
+    if mods & !CARBON_SHIFT_KEY == 0 {
+        CARBON_OPTION_KEY | CARBON_SHIFT_KEY
+    } else {
+        mods
+    }
+}
+
 pub(crate) fn hotkey_combos(kind: ShortcutKind, cfg: &ShortcutConfig) -> Vec<(u32, u32)> {
     if cfg.is_unset() {
         return Vec::new();
@@ -819,6 +834,20 @@ impl SharedCaptureTelemetry {
             scrawl_log("emit_capture_shortcut");
             let _ = self.ui_sender.try_send(LiveOverlayEvent::CaptureShortcut);
         }
+    }
+
+    /// A tool shortcut (`tool_modifiers` with 1–4): that tool, or the pen again when it's the one
+    /// already chosen.
+    pub fn emit_tool_shortcut(&self, tool: Option<Tool>) {
+        if self.shortcuts_paused.load(Ordering::Acquire) {
+            return;
+        }
+        let next = if tool.is_some() && self.tool() == tool {
+            None
+        } else {
+            tool
+        };
+        let _ = self.ui_sender.try_send(LiveOverlayEvent::Tool(next));
     }
 
     pub fn emit_paste_shortcut(&self) {
@@ -1944,6 +1973,16 @@ mod tests {
             scale: 2.0,
         });
         telemetry
+    }
+
+    #[test]
+    fn tool_shortcuts_take_the_record_shortcuts_modifiers_but_never_bare_keys() {
+        let opt_shift = CARBON_OPTION_KEY | CARBON_SHIFT_KEY;
+        assert_eq!(tool_modifiers(opt_shift), opt_shift);
+        let ctrl_cmd = CARBON_CONTROL_KEY | CARBON_CMD_KEY;
+        assert_eq!(tool_modifiers(ctrl_cmd), ctrl_cmd);
+        assert_eq!(tool_modifiers(0), opt_shift);
+        assert_eq!(tool_modifiers(CARBON_SHIFT_KEY), opt_shift);
     }
 
     #[test]
