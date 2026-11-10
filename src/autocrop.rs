@@ -1944,6 +1944,7 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            tool: None,
             pts: vec![x, 5000, 0, x + 500, 5000, 100],
         };
         let strokes = [stroke(1_000, 1000), stroke(9_000, 8000)];
@@ -2010,6 +2011,7 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            tool: None,
             pts: vec![(0.5 * SCALE as f32) as i32, (0.75 * SCALE as f32) as i32, 0],
         };
         let view = crop_view(r, &keyframe(1, 0), &[stroke], &[], &[click(0, 0.25, 1.0)]);

@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::model::{
-    CaptureMode, InteractionEvent, RgbaFrame, SCALE, Stroke, TargetFrame, TargetInfo,
+    CaptureMode, InteractionEvent, RgbaFrame, SCALE, Stroke, TargetFrame, TargetInfo, Tool,
 };
 
 // The operating system side of capture: global shortcuts, input monitoring, the frontmost app,
@@ -743,6 +743,10 @@ pub struct SharedCaptureTelemetry {
     agent_context: AtomicBool,
     /// A ⇧-press inside the target: when, where (global points) and on which frame.
     shift_press: Mutex<Option<(u64, f64, f64, TargetFrame)>>,
+    /// What ⇧ draws with (`tool`, `set_tool`): 0 the pen, else a shape tool.
+    tool: AtomicU8,
+    /// Where the shape being drawn began, in the target's points.
+    shape_anchor: Mutex<[f32; 2]>,
 }
 
 impl SharedCaptureTelemetry {
@@ -790,6 +794,8 @@ impl SharedCaptureTelemetry {
             drag_start: Mutex::new(None),
             agent_context: AtomicBool::new(false),
             shift_press: Mutex::new(None),
+            tool: AtomicU8::new(0),
+            shape_anchor: Mutex::new([0.0; 2]),
         })
     }
 
@@ -893,8 +899,38 @@ impl SharedCaptureTelemetry {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = rect;
     }
 
+    /// What ⇧ draws with (`shapeTools`): `None` is the pen. Each recording starts with the pen.
+    pub fn tool(&self) -> Option<Tool> {
+        match self.tool.load(Ordering::Acquire) {
+            1 => Some(Tool::Line),
+            2 => Some(Tool::Arrow),
+            3 => Some(Tool::Rect),
+            _ => None,
+        }
+    }
+
+    pub fn set_tool(&self, tool: Option<Tool>) {
+        let code = match tool {
+            None => 0,
+            Some(Tool::Line) => 1,
+            Some(Tool::Arrow) => 2,
+            Some(Tool::Rect) => 3,
+        };
+        self.tool.store(code, Ordering::Release);
+    }
+
+    /// A shape is being drawn, so ⌘ and ⌥ (Ctrl and Alt on Windows) shape it rather than end it.
+    pub fn shaping(&self) -> bool {
+        self.live_ink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|stroke| stroke.tool.is_some())
+    }
+
     pub fn reset_for_session(&self, frame: TargetFrame) {
         self.selecting.store(false, Ordering::Release);
+        self.set_tool(None);
         *self
             .picker_rect
             .lock()
@@ -1132,6 +1168,7 @@ impl SharedCaptureTelemetry {
             on: None,
             pin: Some(number),
             laser: false,
+            tool: None,
             pts: vec![
                 (nx * SCALE as f32).round() as i32,
                 (ny * SCALE as f32).round() as i32,
@@ -1368,12 +1405,14 @@ fn same_target_frame(a: TargetFrame, b: TargetFrame) -> bool {
 
 /// One poll of the Shift ink: holding Shift alone and moving the cursor inside the capture
 /// target draws a persistent stroke; letting go of Shift commits it. `pure_shift` is Shift
-/// without other modifiers (and not left over from a chord such as the capture shortcut).
+/// without other modifiers (and not left over from a chord such as the capture shortcut), or
+/// Shift still held over a shape being drawn, which `mods` then shape (`crate::shapes`).
 fn track_shift_ink(
     telemetry: &SharedCaptureTelemetry,
     (x, y): (f64, f64),
     pure_shift: bool,
     prev_shift_ink: bool,
+    mods: crate::shapes::Mods,
 ) {
     let inside_target = telemetry.contains_screen_point(x, y);
     if pure_shift && inside_target {
@@ -1389,17 +1428,43 @@ fn track_shift_ink(
         if guard.is_none() {
             telemetry.window_log_request.store(true, Ordering::Release);
         }
-        let stroke = guard.get_or_insert_with(|| Stroke {
-            t0: t_ms,
-            t1: t_ms,
-            fw,
-            fh,
-            on: None,
-            pin: None,
-            laser: false,
-            pts: Vec::new(),
+        let point = [nx * fw as f32, ny * fh as f32];
+        let stroke = guard.get_or_insert_with(|| {
+            *telemetry
+                .shape_anchor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = point;
+            Stroke {
+                t0: t_ms,
+                t1: t_ms,
+                fw,
+                fh,
+                on: None,
+                pin: None,
+                laser: false,
+                tool: telemetry.tool(),
+                pts: Vec::new(),
+            }
         });
         let dt = t_ms.saturating_sub(stroke.t0) as i32;
+        if let Some(tool) = stroke.tool {
+            // The whole shape again, from where it began to the pointer, as the stroke's points.
+            let anchor = *telemetry
+                .shape_anchor
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (from, to) = crate::shapes::ends(tool, anchor, point, mods);
+            let (w, h) = (stroke.fw.max(1) as f32, stroke.fh.max(1) as f32);
+            let scale = |v: f32, size: f32| {
+                (v / size * SCALE as f32).round().clamp(0.0, SCALE as f32) as i32
+            };
+            stroke.pts = crate::shapes::outline(tool, from, to)
+                .into_iter()
+                .flat_map(|[px, py]| [scale(px, w), scale(py, h), dt])
+                .collect();
+            stroke.t1 = t_ms;
+            return;
+        }
         let should_push = stroke.pts.chunks_exact(3).last().is_none_or(|prev| {
             let dx = (sx - prev[0]) as f32 / SCALE as f32 * fw as f32;
             let dy = (sy - prev[1]) as f32 / SCALE as f32 * fh as f32;
@@ -1882,6 +1947,46 @@ mod tests {
     }
 
     #[test]
+    fn a_shape_tool_draws_its_shape_and_modifiers_shape_it_until_shift_is_up() {
+        let telemetry = session(1000.0, 1000.0);
+        telemetry.set_tool(Some(Tool::Rect));
+        let plain = crate::shapes::Mods::default();
+        track_shift_ink(&telemetry, (100.0, 100.0), true, false, plain);
+        assert!(telemetry.shaping());
+        track_shift_ink(&telemetry, (300.0, 160.0), true, true, plain);
+        // ⌘ makes it a square, on the longer side.
+        let snap = crate::shapes::Mods {
+            snap: true,
+            ..plain
+        };
+        track_shift_ink(&telemetry, (300.0, 160.0), true, true, snap);
+        track_shift_ink(&telemetry, (300.0, 160.0), false, true, snap);
+        let strokes = telemetry.strokes.lock().unwrap().clone();
+        assert_eq!(strokes.len(), 1);
+        assert_eq!(strokes[0].tool, Some(Tool::Rect));
+        let [x0, y0, x1, y1] = crate::sketch::bounds(&strokes[0].normalized_points());
+        assert!(
+            (x0 - 0.1).abs() < 0.002 && (y0 - 0.1).abs() < 0.002,
+            "{x0} {y0}"
+        );
+        assert!(
+            (x1 - 0.3).abs() < 0.002 && (y1 - 0.3).abs() < 0.002,
+            "{x1} {y1}"
+        );
+        let marks = crate::sketch::marks_of(&strokes);
+        assert_eq!(marks[0].shape, crate::model::Shape::Box);
+
+        // Each recording starts with the pen, and a ⇧ tap without moving draws nothing.
+        let frame = *telemetry.target_frame.lock().unwrap();
+        telemetry.reset_for_session(frame);
+        assert_eq!(telemetry.tool(), None);
+        telemetry.set_tool(Some(Tool::Arrow));
+        track_shift_ink(&telemetry, (500.0, 500.0), true, false, plain);
+        track_shift_ink(&telemetry, (500.0, 500.0), false, true, plain);
+        assert!(telemetry.strokes.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn a_long_still_shift_press_drops_no_pin() {
         let down = (1_000, 10.0, 10.0);
         let slop = f64::from(CLICK_SLOP_PT);
@@ -1905,6 +2010,7 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            tool: None,
             pts: pts.iter().flat_map(|&(x, y, t)| [x, y, t]).collect(),
         };
         let press = telemetry.elapsed_ms() + 50;
@@ -1922,7 +2028,7 @@ mod tests {
         assert_eq!(telemetry.live_ink.lock().unwrap().as_ref(), Some(&line));
         // Letting go of ⇧ commits it as one stroke.
         let at = (200.0, 500.0);
-        track_shift_ink(&telemetry, at, false, true);
+        track_shift_ink(&telemetry, at, false, true, crate::shapes::Mods::default());
 
         // Drawn long before the press still counts: the hold is a drawing.
         *telemetry.live_ink.lock().unwrap() = Some(ink(&[(s / 10, s / 10, 0), (s / 5, s / 10, 1)]));

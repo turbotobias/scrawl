@@ -1933,6 +1933,7 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            tool: None,
             pts: vec![1500, 6000, 0, 5000, 6000, 200, 8500, 6000, 400],
         };
         let result = render_annotated_keyframe(&base, &key(1), &[stroke.clone()], &[], &[]);
@@ -1968,6 +1969,7 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            tool: None,
             pts: vec![1500, y, 0, 5000, y, 100, 8500, y, 200],
         };
         let strokes = [stroke(6000), stroke(7500), stroke(9000)];

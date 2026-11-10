@@ -310,8 +310,11 @@ pub fn marks_of(strokes: &[Stroke]) -> Vec<Mark> {
     for (i, stroke) in strokes.iter().enumerate().filter(|(_, s)| !s.laser) {
         if let Some(group) = groups.last_mut() {
             let prev = &strokes[*group.last().unwrap()];
+            // A shape tool's stroke is a mark of its own.
             if prev.pin.is_none()
                 && stroke.pin.is_none()
+                && prev.tool.is_none()
+                && stroke.tool.is_none()
                 && stroke.t0.saturating_sub(prev.t1) <= MARK_GAP_MS
                 && group.len() < MAX_MARK_STROKES
             {
@@ -356,6 +359,21 @@ pub fn marks_of(strokes: &[Stroke]) -> Vec<Mark> {
                     .unwrap_or([0.0; 2]);
                 mark.box_norm = [x, y, x, y];
                 mark.shape = Shape::Pin;
+            } else if let Some(tool) = first.tool {
+                // The tool says what was drawn: no guessing from the path.
+                let (fw, fh) = (first.fw.max(1) as f32, first.fh.max(1) as f32);
+                let px: Vec<_> = all.iter().map(|p| [p[0] * fw, p[1] * fh]).collect();
+                mark.shape = match tool {
+                    Tool::Rect => Shape::Box,
+                    Tool::Line => Shape::Line,
+                    Tool::Arrow => Shape::Arrow,
+                };
+                if tool != Tool::Rect
+                    && let Some((from, to)) = crate::shapes::tip_of(&px)
+                {
+                    mark.from = Some([from[0] / fw, from[1] / fh]);
+                    mark.to = Some([to[0] / fw, to[1] / fh]);
+                }
             } else {
                 let mut sized: Vec<_> = group
                     .iter()
@@ -447,6 +465,7 @@ pub fn describe_mark(mark: &Mark) -> String {
     };
     let mut text = match mark.shape {
         Shape::Circle => format!("circled region {region}{many}"),
+        Shape::Box => format!("boxed region {region}"),
         Shape::Underline => format!(
             "underlined x {x0:.2}–{x1:.2} at y {:.2}{many}",
             (y0 + y1) / 2.0
@@ -1469,6 +1488,7 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            tool: None,
             pts: points
                 .iter()
                 .flat_map(|p| {

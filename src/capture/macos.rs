@@ -1760,9 +1760,11 @@ fn run_global_hid_poller(telemetry: Arc<SharedCaptureTelemetry>) {
         let ctrl = (flags & FLAG_CONTROL) != 0;
         let alt = (flags & FLAG_ALTERNATE) != 0;
         let shift = (flags & FLAG_SHIFT) != 0;
+        // Over a shape being drawn, ⌘ and ⌥ shape it; otherwise they end the ink until ⇧ is up.
+        let shaping = shift && telemetry.shaping();
         if !shift {
             await_shift_release = false;
-        } else if cmd || ctrl || alt {
+        } else if (cmd || ctrl || alt) && !shaping {
             await_shift_release = true;
         }
         let mod_mask =
@@ -1803,9 +1805,13 @@ fn run_global_hid_poller(telemetry: Arc<SharedCaptureTelemetry>) {
             |x, y| telemetry.on_scrawl_window(x, y),
         );
 
-        let pure_shift = shift && !cmd && !ctrl && !alt && !await_shift_release;
+        let pure_shift = shift && (shaping || !cmd && !ctrl && !alt) && !await_shift_release;
         // Hold Shift + move cursor inside the capture target = draw a persistent stroke.
-        track_shift_ink(&telemetry, (loc.x, loc.y), pure_shift, prev_shift_ink);
+        let mods = crate::shapes::Mods {
+            snap: cmd,
+            centre: alt,
+        };
+        track_shift_ink(&telemetry, (loc.x, loc.y), pure_shift, prev_shift_ink, mods);
 
         prev_shift_ink = pure_shift;
     }

@@ -45,6 +45,7 @@ mod routing;
 mod screens;
 mod settings;
 mod settings_window;
+mod shapes;
 mod shortcut;
 mod sketch;
 #[cfg(target_os = "macos")]
@@ -1434,6 +1435,7 @@ pub fn generate_demo_bundle(out: Option<PathBuf>) -> Result<(PathBuf, ScrawlBund
         on: Some("Band header".into()),
         pin: None,
         laser: false,
+        tool: None,
         pts: circle_pts,
     };
 
@@ -1453,6 +1455,7 @@ pub fn generate_demo_bundle(out: Option<PathBuf>) -> Result<(PathBuf, ScrawlBund
         on: Some("Used 12 tools".into()),
         pin: None,
         laser: false,
+        tool: None,
         pts: shaft_pts,
     };
     let arrow_head = Stroke {
@@ -1463,6 +1466,7 @@ pub fn generate_demo_bundle(out: Option<PathBuf>) -> Result<(PathBuf, ScrawlBund
         on: Some("Used 12 tools".into()),
         pin: None,
         laser: false,
+        tool: None,
         pts: vec![
             (0.41 * SCALE as f32) as i32,
             (0.35 * SCALE as f32) as i32,
@@ -1485,6 +1489,7 @@ pub fn generate_demo_bundle(out: Option<PathBuf>) -> Result<(PathBuf, ScrawlBund
         on: Some("Send button".into()),
         pin: Some(1),
         laser: false,
+        tool: None,
         pts: vec![
             (0.88 * SCALE as f32) as i32,
             (0.88 * SCALE as f32) as i32,

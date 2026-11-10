@@ -330,6 +330,7 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            tool: None,
             pts: pts.iter().flat_map(|&(x, y, t)| [x, y, t]).collect(),
         }
     }

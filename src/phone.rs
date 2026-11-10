@@ -1015,6 +1015,7 @@ pub fn import(
                 on: None,
                 pin: None,
                 laser: false,
+                tool: None,
                 pts,
             })
         })
