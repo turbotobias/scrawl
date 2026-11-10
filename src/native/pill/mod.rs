@@ -1027,7 +1027,10 @@ impl PillRuntimeState {
             ElemId::Inspect => PillAction::Inspect,
             ElemId::Route0 => PillAction::Route(0),
             ElemId::Route1 => PillAction::Route(1),
-            _ => return,
+            id => match ElemId::TOOLS.iter().find(|(t, _)| *t == id) {
+                Some(&(_, tool)) => PillAction::Tool(tool),
+                None => return,
+            },
         };
         let _ = self.action_tx.try_send(action);
     }
@@ -1609,6 +1612,37 @@ fn emit_elem_prims(
                 );
             }
         }
+        ElemId::ToolPen | ElemId::ToolLine | ElemId::ToolArrow | ElemId::ToolRect => {
+            // Like a mode chip, icon only: the chosen tool is lit.
+            if is_glass {
+                let smoke_a = 0.20 + 0.18 * elem.active + 0.10 * elem.hover;
+                push_shape(out, [ox, oy, bw, bh], bh * 0.5, [0.06, 0.07, 0.10, smoke_a]);
+            } else {
+                let bg_a = 0.16 * elem.active
+                    + 0.08 * elem.hover * (1.0 - elem.active)
+                    + 0.06 * elem.press;
+                if bg_a > 0.002 {
+                    push_shape(out, [ox, oy, bw, bh], bh * 0.5, [1.0, 1.0, 1.0, bg_a]);
+                }
+            }
+            let ic = atlas.icon(match elem.id {
+                ElemId::ToolPen => IconKind::Pen,
+                ElemId::ToolLine => IconKind::Line,
+                ElemId::ToolArrow => IconKind::Arrow,
+                _ => IconKind::Rect,
+            });
+            let fg = if is_glass {
+                0.90 + 0.10 * elem.active.max(elem.hover)
+            } else {
+                0.608 + 0.353 * elem.active.max(elem.hover * 0.65)
+            };
+            push_sprite(
+                out,
+                [ox + (bw - 15.0) * 0.5, oy + (bh - 15.0) * 0.5, 15.0, 15.0],
+                ic.uv,
+                [fg, fg, fg, 1.0],
+            );
+        }
         ElemId::DividerLead | ElemId::DividerClose => {
             push_shape(
                 out,
@@ -1781,6 +1815,7 @@ mod tests {
             chips,
             has_iphone: false,
             live: model::Rows { wave, caption },
+            tools: model::Tools::default(),
         };
         // Speech with a pause in it.
         let speech: Vec<f32> = (0..WAVE_BARS)
@@ -1828,7 +1863,7 @@ mod tests {
                 .iter()
                 .all(|l| atlas::measure_caption(l) <= CAPTION_TEXT_W)
         );
-        let states: [(&str, Pres, &LiveDraw, Vec<String>); 6] = [
+        let states: [(&str, Pres, &LiveDraw, Vec<String>); 7] = [
             (
                 "live-1-talking",
                 recording(false, true, false),
@@ -1860,6 +1895,23 @@ mod tests {
                 words.clone(),
             ),
             ("live-6-chips", recording(true, true, true), &talking, words),
+            (
+                "live-7-tools",
+                Pres::Recording {
+                    chips: false,
+                    has_iphone: false,
+                    live: model::Rows {
+                        wave: true,
+                        caption: false,
+                    },
+                    tools: model::Tools {
+                        shown: true,
+                        chosen: Some(crate::model::Tool::Arrow),
+                    },
+                },
+                &talking,
+                vec![],
+            ),
         ];
         let out = std::env::var_os("SCRAWL_PILL_STILLS").map(std::path::PathBuf::from);
         if let Some(dir) = &out {

@@ -359,8 +359,21 @@ pub struct Stroke {
     pub pin: Option<u32>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub laser: bool,
+    /// The shape tool that drew it (`crate::shapes`); `None` is the pen. A shape's `pts` are its
+    /// outline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<Tool>,
     /// Flat triples `[x, y, dt_ms, ...]` where `x, y` are in `0..=SCALE` and `dt_ms` is ms since `t0`.
     pub pts: Vec<i32>,
+}
+
+/// A shape tool (`shapeTools` experiment); the pen draws freehand.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tool {
+    Line,
+    Arrow,
+    Rect,
 }
 
 impl Stroke {
@@ -415,6 +428,8 @@ impl Stroke {
 #[serde(rename_all = "snake_case")]
 pub enum Shape {
     Circle,
+    /// A rectangle drawn with the box tool.
+    Box,
     Underline,
     Line,
     Arrow,
@@ -684,6 +699,7 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            tool: None,
             pts: vec![10, 20, 0, 30, 40, 300],
         };
         assert!(!before.rebase(500));
@@ -696,6 +712,7 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            tool: None,
             pts: vec![10, 20, 0, 20, 30, 150, 30, 40, 200, 50, 60, 400],
         };
         assert!(spanning.rebase(500));
@@ -711,6 +728,7 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            tool: None,
             pts: vec![10, 20, 0, 50, 60, 200],
         };
         assert!(after.rebase(500));

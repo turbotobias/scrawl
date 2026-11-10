@@ -1004,9 +1004,11 @@ fn run_key_poller(telemetry: Arc<SharedCaptureTelemetry>) {
             alt,
             shift,
         } = mods;
+        // Over a shape being drawn, Ctrl and Alt shape it; otherwise they end the ink until ⇧ is up.
+        let shaping = shift && telemetry.shaping();
         if !shift {
             await_shift_release = false;
-        } else if win || ctrl || alt {
+        } else if (win || ctrl || alt) && !shaping {
             await_shift_release = true;
         }
 
@@ -1077,12 +1079,19 @@ fn run_key_poller(telemetry: Arc<SharedCaptureTelemetry>) {
             |x, y| telemetry.on_scrawl_window(x, y),
         );
 
-        let pure_shift = shift && !win && !ctrl && !alt && !await_shift_release;
+        let pure_shift = shift && (shaping || !win && !ctrl && !alt) && !await_shift_release;
         // Hold Shift + move the cursor inside the capture target = draw a persistent stroke.
-        track_shift_ink(&telemetry, (x, y), pure_shift, prev_shift_ink);
+        let shape_mods = crate::shapes::Mods {
+            snap: ctrl,
+            centre: alt,
+        };
+        track_shift_ink(&telemetry, (x, y), pure_shift, prev_shift_ink, shape_mods);
         prev_shift_ink = pure_shift;
     }
 }
+
+/// The tool shortcuts are macOS's for now (the tools' buttons are the native capsule's).
+pub fn set_tool_hotkeys(_telemetry: &SharedCaptureTelemetry, _on: bool) {}
 
 // MARK: Recording
 

@@ -1922,6 +1922,57 @@ mod tests {
         assert_eq!(result.rgba, frame.rgba);
     }
 
+    /// A box and an arrow from the shape tools land on the keyframe as drawn: straight sides and an
+    /// open middle. `SCRAWL_SHAPE_STILL=PATH` saves the frame.
+    #[test]
+    fn shapes_draw_on_keyframes_with_straight_sides() {
+        let (w, h) = (640_u32, 400_u32);
+        let shape = |tool, from: [f32; 2], to: [f32; 2]| Stroke {
+            t0: 3500,
+            t1: 3900,
+            fw: w,
+            fh: h,
+            on: None,
+            pin: None,
+            laser: false,
+            tool: Some(tool),
+            pts: crate::shapes::outline(tool, from, to)
+                .into_iter()
+                .flat_map(|[x, y]| {
+                    let s = SCALE as f32;
+                    [(x / w as f32 * s) as i32, (y / h as f32 * s) as i32, 400]
+                })
+                .collect(),
+        };
+        let strokes = [
+            shape(Tool::Rect, [80.0, 120.0], [300.0, 300.0]),
+            shape(Tool::Arrow, [380.0, 320.0], [560.0, 140.0]),
+        ];
+        let base = solid(w, h, [20, 20, 20, 255]);
+        let result = render_annotated_keyframe(&base, &key(1), &strokes, &[], &[]);
+        if let Some(path) = std::env::var_os("SCRAWL_SHAPE_STILL") {
+            save_png(&result, std::path::Path::new(&path)).unwrap();
+        }
+        let red = |x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            result.rgba[i] > 200 && result.rgba[i + 1] < 120
+        };
+        // Each side of the box is ink, near its corners too; its middle isn't.
+        for (x, y) in [
+            (190, 120),
+            (190, 300),
+            (80, 210),
+            (300, 210),
+            (84, 120),
+            (300, 296),
+        ] {
+            assert!(red(x, y), "box at {x},{y}");
+        }
+        assert!(!red(190, 210));
+        // The arrow's shaft and tip.
+        assert!(red(470, 230) && red(558, 142));
+    }
+
     #[test]
     fn active_ink_paints_red_but_future_ink_is_hidden() {
         let base = solid(320, 200, [20, 20, 20, 255]);
@@ -1933,6 +1984,7 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            tool: None,
             pts: vec![1500, 6000, 0, 5000, 6000, 200, 8500, 6000, 400],
         };
         let result = render_annotated_keyframe(&base, &key(1), &[stroke.clone()], &[], &[]);
@@ -1968,6 +2020,7 @@ mod tests {
             on: None,
             pin: None,
             laser: false,
+            tool: None,
             pts: vec![1500, y, 0, 5000, y, 100, 8500, y, 200],
         };
         let strokes = [stroke(6000), stroke(7500), stroke(9000)];

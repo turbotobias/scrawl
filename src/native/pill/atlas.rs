@@ -49,6 +49,11 @@ pub enum IconKind {
     Iphone,
     Close,
     Check,
+    /// The shape tools (`shapeTools`).
+    Pen,
+    Line,
+    Arrow,
+    Rect,
 }
 
 impl IconKind {
@@ -268,6 +273,34 @@ fn rasterize_icon(kind: IconKind, size_pt: f32, scale: f32) -> (u32, u32, [f32; 
             line_seg(&ctx, 6.5, 6.5, 17.5, 17.5);
             line_seg(&ctx, 17.5, 6.5, 6.5, 17.5);
         }
+        IconKind::Pen => {
+            // A freehand squiggle.
+            let (ax, ay) = map(3.5, 15.5);
+            let (c1x, c1y) = map(7.0, 5.0);
+            let (c2x, c2y) = map(10.5, 6.0);
+            let (bx, by) = map(12.0, 12.0);
+            let (c3x, c3y) = map(13.5, 18.0);
+            let (c4x, c4y) = map(17.5, 19.0);
+            let (cx, cy) = map(20.5, 8.5);
+            ctx.begin_path();
+            ctx.move_to_point(ax, ay);
+            ctx.add_curve_to_point(c1x, c1y, c2x, c2y, bx, by);
+            ctx.add_curve_to_point(c3x, c3y, c4x, c4y, cx, cy);
+            ctx.stroke_path();
+        }
+        IconKind::Line => line_seg(&ctx, 5.0, 19.0, 19.0, 5.0),
+        IconKind::Arrow => {
+            line_seg(&ctx, 5.0, 19.0, 18.5, 5.5);
+            let (ax, ay) = map(10.0, 5.5);
+            let (bx, by) = map(18.5, 5.5);
+            let (cx, cy) = map(18.5, 14.0);
+            ctx.begin_path();
+            ctx.move_to_point(ax, ay);
+            ctx.add_line_to_point(bx, by);
+            ctx.add_line_to_point(cx, cy);
+            ctx.stroke_path();
+        }
+        IconKind::Rect => rrect(&ctx, 3.5, 5.5, 17.0, 13.0, 2.0),
         IconKind::Check => {
             ctx.set_line_width(2.6 * s);
             let (ax, ay) = map(5.5, 12.5);
@@ -364,6 +397,10 @@ impl GlyphAtlas {
             (IconKind::Iphone, 14.0),
             (IconKind::Close, 12.0),
             (IconKind::Check, 13.0),
+            (IconKind::Pen, 15.0),
+            (IconKind::Line, 15.0),
+            (IconKind::Arrow, 15.0),
+            (IconKind::Rect, 15.0),
         ] {
             let (w, h, size_pt, bytes) = rasterize_icon(kind, size_pt, scale);
             let sprite = atlas.pack(w, h, size_pt, &bytes);
@@ -586,6 +623,10 @@ mod tests {
             IconKind::Iphone,
             IconKind::Close,
             IconKind::Check,
+            IconKind::Pen,
+            IconKind::Line,
+            IconKind::Arrow,
+            IconKind::Rect,
         ] {
             let (w, h, _, rgba) = rasterize_icon(kind, 14.0, 2.0);
             assert_eq!(w, 28);
