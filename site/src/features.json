@@ -42,6 +42,17 @@
       "docs": ["docs/capture.md"]
     },
     {
+      "id": "remember-selection",
+      "group": "start",
+      "name": "Record what you chose last",
+      "says": "The shortcut records the window, area or screen you chose last, while it's still there (if the window closed, its app's front window), and the chips light it and offer the others.",
+      "status": "experiment:rememberSelection",
+      "platforms": ["mac", "windows", "linux"],
+      "added": "2026-11-11",
+      "note": "Tried on a Mac only. An iPhone capture leaves the choice as it was.",
+      "docs": ["README.md#capture-controls", "docs/capture.md", "docs/keyframes-and-text.md"]
+    },
+    {
       "id": "picker",
       "group": "start",
       "name": "Choose What to Record…",
@@ -184,6 +195,17 @@
       "platforms": ["mac"],
       "added": "2026-10-29",
       "note": "The Metal capsule only. It's kept on screen whatever it grows to.",
+      "docs": ["README.md#capture-controls", "docs/capture.md"]
+    },
+    {
+      "id": "button-tips",
+      "group": "record",
+      "name": "Button tooltips",
+      "says": "Resting the pointer on a capsule button shows what it does and its keys: Finish ⌥⇧S, the shape tools' ⌥⇧1–4, Paste ⌥⇧V, and the picker's 1–4, record and esc.",
+      "status": "main",
+      "platforms": ["mac"],
+      "added": "2026-11-11",
+      "note": "The Metal capsule only.",
       "docs": ["README.md#capture-controls", "docs/capture.md"]
     },
     {

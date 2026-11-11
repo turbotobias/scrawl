@@ -11,6 +11,7 @@
 pub mod atlas;
 pub mod model;
 mod place;
+mod tip;
 mod types;
 
 pub use self::types::{PillAction, PillSnapshot, PillStyle};
@@ -342,6 +343,9 @@ struct PillRuntimeState {
     drawn_at: std::time::Instant,
     place: Place,
     drag: Option<Drag>,
+    tip: tip::Tip,
+    /// The shortcuts the tooltips name.
+    keys: model::Keys,
 }
 
 /// A press on the capsule, which becomes a drag of it once it moves `place::DRAG_SLOP`.
@@ -369,6 +373,7 @@ pub struct NativePill {
     display_link_ctx: Option<*const SharedNativePill>,
     action_rx: flume::Receiver<PillAction>,
     window_num: u32,
+    tip_window_num: u32,
 }
 
 impl NativePill {
@@ -453,6 +458,8 @@ impl NativePill {
             gv.setHidden(true);
         }
         let window_num = window.windowNumber().max(0) as u32;
+        let tip = tip::Tip::open(mtm);
+        let tip_window_num = tip.window_number();
 
         let shared = Arc::new(SharedNativePill {
             state: Mutex::new(PillRuntimeState {
@@ -476,6 +483,8 @@ impl NativePill {
                 drawn_at: std::time::Instant::now(),
                 place,
                 drag: None,
+                tip,
+                keys: model::Keys::default(),
             }),
             tick_queued: AtomicBool::new(false),
             alive: AtomicBool::new(true),
@@ -507,11 +516,17 @@ impl NativePill {
             display_link_ctx,
             action_rx,
             window_num,
+            tip_window_num,
         })
     }
 
     pub fn window_number(&self) -> u32 {
         self.window_num
+    }
+
+    /// The buttons' tooltip panel, kept out of recordings like the capsule.
+    pub fn tip_window_number(&self) -> u32 {
+        self.tip_window_num
     }
 
     /// Moves the capsule to the screen holding `point` (global points, top-left origin), below
@@ -545,6 +560,9 @@ impl NativePill {
                 st.dirty = true;
             }
             st.model.reduced = snapshot.reduced_motion;
+            if st.keys != snapshot.keys {
+                st.keys = snapshot.keys.clone();
+            }
             if st.model.clock != snapshot.clock {
                 st.pipelines.atlas.update_clock(&snapshot.clock);
                 st.model.set_clock(&snapshot.clock);
@@ -571,6 +589,7 @@ impl NativePill {
                 if was_hidden {
                     st.window.setLevel(NSStatusWindowLevel + 5);
                     st.window.orderFrontRegardless();
+                    st.tip.order_front();
                 }
             }
             if (motion::now() - st.last_tick_now) >= f64::from(0.045 * motion::time_scale()) {
@@ -610,6 +629,7 @@ impl Drop for NativePill {
         if let Ok(st) = self.shared.state.lock() {
             st.window.orderOut(None);
             st.window.close();
+            st.tip.close();
         }
         if let Some(ctx) = self.display_link_ctx {
             unsafe { drop(Arc::from_raw(ctx)) };
@@ -737,6 +757,7 @@ impl SharedNativePill {
         // Poll mouse cursor and button state for hover, press squish, click, and Paste drag.
         st.poll_pointer_and_input();
         st.poll_live();
+        st.update_tip();
 
         let now = motion::now();
         let raw_dt = (now - st.last_tick_now).max(0.0) as f32;
@@ -950,6 +971,30 @@ impl PillRuntimeState {
         }
         let k = 1.0 - (-dt / 0.06).exp();
         self.move_to([x + dx * k, y + dy * k]);
+    }
+
+    /// The tooltip of the button under the pointer (`model::tip_of`), once the pointer rests on
+    /// it; none while the capsule is hidden or dragged.
+    fn update_tip(&mut self) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let m = &self.model;
+        let idle = !m.is_fully_hidden() && !self.drag.is_some_and(|d| d.moving);
+        let want = m.hovered.filter(|_| idle).and_then(|id| {
+            let text = model::tip_of(&m.pres, id, &self.keys)?;
+            let (lay, items) = model::layout_of(&m.pres, &m.clock, m.labels, &m.metrics);
+            let [x, _, w, _] = items.iter().find(|item| item.id == id)?.rect;
+            let [ox, oy] = self.screen_origin_top_left.map(f64::from);
+            let anchor = tip::Anchor {
+                x: ox + f64::from(x + w * 0.5),
+                top: oy + f64::from(lay.t),
+                bottom: oy + f64::from(lay.b),
+                visible: self.place.visible.map(f64::from),
+            };
+            Some((id, text, anchor))
+        });
+        self.tip.update(mtm, want, self.was_mouse_down);
     }
 
     /// The capsule's resting bounds in the panel for what it shows now.
@@ -1814,6 +1859,7 @@ mod tests {
         let recording = |chips, wave, caption| Pres::Recording {
             chips,
             has_iphone: false,
+            mode: SelectionMode::Screen,
             live: model::Rows { wave, caption },
             tools: model::Tools::default(),
         };
@@ -1900,6 +1946,7 @@ mod tests {
                 Pres::Recording {
                     chips: false,
                     has_iphone: false,
+                    mode: SelectionMode::Screen,
                     live: model::Rows {
                         wave: true,
                         caption: false,

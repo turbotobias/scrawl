@@ -221,6 +221,11 @@ Preview every pane, dark and light, with the recorder listening and a combinatio
   hovering keeps them. Click Window or Area to retarget (the first seconds are dropped and the
   picker takes over: click a window or drag an area), iPhone to record the phone instead, or just
   carry on.
+- **Record what you chose last** (experiment `rememberSelection`): the press records the window,
+  area or screen you last chose instead of the screen under the pointer, as long as it's still
+  there (a closed window gives way to its app's front window, else the screen). The chips light
+  what it's recording; Window or Area opens the picker to choose another, Screen switches to the
+  screen.
 - **Choose What to Record…** in the menu bar: the picker (Area, Window, Screen, iPhone) opens on
   the display under the pointer. Click a mode, click a window or drag an area; `Esc` cancels.
 - `⌥⇧V`: Paste both `contact-sheet.png` and `summary.md` into the active app or terminal (`⌃⌥⇧V` also works while it's the default)
@@ -235,6 +240,8 @@ Preview every pane, dark and light, with the recorder listening and a combinatio
 - **`⇧`-click**: Drop a numbered pin where you click (a press that moves under 12 pt and lets go within 1 s; longer is ink). It shows as a brief red pulse, not a lasting dot, and lands on the keyframes. A click after you've drawn in the same `⇧` hold is part of the drawing and drops no pin
 - **`⌘Z`**: Undo the last stroke
 - **`Esc`**: Cancel the active selection or capture
+- **Rest the pointer on a capsule button**: a tooltip says what it does and its keys (Finish
+  `⌥⇧S`, the tools' `⌥⇧1`–`⌥⇧4`, Paste `⌥⇧V`, the picker's `1`–`4` and `esc`)
 - **Drag the capsule**: Move it out of the way. It stays there for later captures; drop it near
   the top centre to put it back
 

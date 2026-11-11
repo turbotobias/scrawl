@@ -1,6 +1,6 @@
 //! The native pill's values shared with the coordinator, on every platform.
 
-use super::model::Pres;
+use super::model::{Keys, Pres};
 use crate::ui::{SelectionMode, motion};
 
 /// Capsule visual style (`pillStyle: "black" | "glass"`).
@@ -68,4 +68,6 @@ pub struct PillSnapshot {
     pub clock: String,
     pub reduced_motion: bool,
     pub style: PillStyle,
+    /// The shortcuts the buttons' tooltips name.
+    pub keys: Keys,
 }

@@ -479,6 +479,57 @@ impl ElemId {
     }
 }
 
+/// The shortcuts the buttons' tooltips name (`tip_of`): the record and paste shortcuts' labels
+/// (empty: unset), and the shape tools' modifiers (empty while their hotkeys are off).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Keys {
+    pub record: String,
+    pub paste: String,
+    pub tools: String,
+}
+
+/// A button's tooltip: what it does and the keys that do the same (empty: none), or `None` for a
+/// button whose label says it all and has no keys.
+pub fn tip_of(pres: &Pres, id: ElemId, keys: &Keys) -> Option<(&'static str, String)> {
+    let tip = |name: &'static str, keys: &str| Some((name, keys.to_owned()));
+    match pres {
+        Pres::Selecting { has_iphone, .. } => match id {
+            ElemId::Close => tip("Cancel", "esc"),
+            // The record shortcut records what the picker is on, whichever app has the keys.
+            ElemId::Record if keys.record.is_empty() => tip("Record", "↩"),
+            ElemId::Record => tip("Record", &keys.record),
+            _ => {
+                let mode = id.mode()?;
+                let n = SelectionMode::available(*has_iphone)
+                    .iter()
+                    .position(|m| *m == mode)?;
+                Some((mode.label(), (n + 1).to_string()))
+            }
+        },
+        Pres::Recording { chips: true, .. } => {
+            (id == ElemId::Close).then(|| ("Cancel", String::new()))
+        }
+        Pres::Recording { .. } => match id {
+            ElemId::Finish if !keys.record.is_empty() => tip("Finish", &keys.record),
+            _ => {
+                let n = ElemId::TOOLS.iter().position(|(tool, _)| *tool == id)?;
+                let keys = if keys.tools.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}{}", keys.tools, n + 1)
+                };
+                Some((id.accessibility_label(), keys))
+            }
+        },
+        Pres::Completed { .. } => match id {
+            ElemId::Paste if !keys.paste.is_empty() => tip("Paste", &keys.paste),
+            ElemId::Close => tip("Dismiss", ""),
+            _ => None,
+        },
+        Pres::Hidden | Pres::Processing => None,
+    }
+}
+
 /// The shape tools while recording (`shapeTools`): whether their buttons show, and which is chosen
 /// (`None`: the pen).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -493,6 +544,8 @@ pub enum Pres {
     Recording {
         chips: bool,
         has_iphone: bool,
+        /// What's being recorded: the switch chip lit while the chips show.
+        mode: SelectionMode,
         /// The waveform and the words' row (`live_audio`).
         live: Rows,
         tools: Tools,
@@ -521,12 +574,14 @@ impl Pres {
                     has_iphone: ia,
                     live: la,
                     tools: ta,
+                    ..
                 },
                 Self::Recording {
                     chips: b,
                     has_iphone: ib,
                     live: lb,
                     tools: tb,
+                    ..
                 },
             ) => a == b && (ia == ib || !*a) && la == lb && ta.shown == tb.shown,
             (
@@ -710,6 +765,7 @@ pub fn layout_of(
         Pres::Recording {
             chips,
             has_iphone,
+            mode,
             live,
             tools,
         } => {
@@ -726,7 +782,7 @@ pub fn layout_of(
                         ElemId::from_mode(seg),
                         m.segment_width(seg),
                         CHIP_CORE_ROUND,
-                        f32::from(u8::from(seg == SelectionMode::Screen)),
+                        f32::from(u8::from(seg == *mode)),
                         true,
                     ));
                 }
@@ -1818,6 +1874,7 @@ mod tests {
                     Pres::Recording {
                         chips: true,
                         has_iphone: false,
+                        mode: SelectionMode::Screen,
                         live: Rows::default(),
                         tools: Tools::default(),
                     },
@@ -1838,6 +1895,7 @@ mod tests {
                     Pres::Recording {
                         chips: true,
                         has_iphone: false,
+                        mode: SelectionMode::Screen,
                         live: Rows::default(),
                         tools: Tools::default(),
                     },
@@ -1858,6 +1916,7 @@ mod tests {
                     Pres::Recording {
                         chips: true,
                         has_iphone: false,
+                        mode: SelectionMode::Screen,
                         live: Rows::default(),
                         tools: Tools::default(),
                     },
@@ -1867,6 +1926,7 @@ mod tests {
                     Pres::Recording {
                         chips: false,
                         has_iphone: false,
+                        mode: SelectionMode::Screen,
                         live: Rows::default(),
                         tools: Tools::default(),
                     },
@@ -1901,6 +1961,7 @@ mod tests {
                     Pres::Recording {
                         chips: false,
                         has_iphone: false,
+                        mode: SelectionMode::Screen,
                         live: Rows::default(),
                         tools: Tools::default(),
                     },
@@ -1914,6 +1975,7 @@ mod tests {
                     Pres::Recording {
                         chips: true,
                         has_iphone: false,
+                        mode: SelectionMode::Screen,
                         live: Rows::default(),
                         tools: Tools::default(),
                     },
@@ -1923,6 +1985,7 @@ mod tests {
                     Pres::Recording {
                         chips: false,
                         has_iphone: false,
+                        mode: SelectionMode::Screen,
                         live: Rows::default(),
                         tools: Tools::default(),
                     },
@@ -1968,6 +2031,7 @@ mod tests {
         m.set_pres(Pres::Recording {
             chips: true,
             has_iphone: false,
+            mode: SelectionMode::Screen,
             live: Rows::default(),
             tools: Tools::default(),
         });
@@ -2001,12 +2065,14 @@ mod tests {
             Pres::Recording {
                 chips: true,
                 has_iphone: false,
+                mode: SelectionMode::Screen,
                 live: Rows::default(),
                 tools: Tools::default(),
             },
             Pres::Recording {
                 chips: false,
                 has_iphone: false,
+                mode: SelectionMode::Screen,
                 live: Rows::default(),
                 tools: Tools::default(),
             },
@@ -2072,6 +2138,7 @@ mod tests {
         m.set_pres(Pres::Recording {
             chips: true,
             has_iphone: false,
+            mode: SelectionMode::Screen,
             live: Rows::default(),
             tools: Tools::default(),
         });
@@ -2093,6 +2160,7 @@ mod tests {
         m.set_pres(Pres::Recording {
             chips: false,
             has_iphone: false,
+            mode: SelectionMode::Screen,
             live: Rows::default(),
             tools: Tools::default(),
         });
@@ -2124,6 +2192,7 @@ mod tests {
         m.set_pres(Pres::Recording {
             chips: true,
             has_iphone: false,
+            mode: SelectionMode::Screen,
             live: Rows::default(),
             tools: Tools::default(),
         });
@@ -2205,6 +2274,7 @@ mod tests {
         m.set_pres(Pres::Recording {
             chips: true,
             has_iphone: false,
+            mode: SelectionMode::Screen,
             live: Rows::default(),
             tools: Tools::default(),
         });
@@ -2240,6 +2310,7 @@ mod tests {
         let pres = Pres::Recording {
             chips: false,
             has_iphone: false,
+            mode: SelectionMode::Screen,
             live: Rows::default(),
             tools: Tools::default(),
         };
@@ -2263,6 +2334,7 @@ mod tests {
         let pres = |shown, chosen| Pres::Recording {
             chips: false,
             has_iphone: false,
+            mode: SelectionMode::Screen,
             live: Rows::default(),
             tools: Tools { shown, chosen },
         };
@@ -2300,10 +2372,111 @@ mod tests {
     }
 
     #[test]
+    fn the_switch_chips_light_what_is_being_recorded() {
+        let pres = |mode| Pres::Recording {
+            chips: true,
+            has_iphone: false,
+            mode,
+            live: Rows::default(),
+            tools: Tools::default(),
+        };
+        let lit = |mode| {
+            let (_, items) = layout_of(
+                &pres(mode),
+                "0:00",
+                LabelWidths::default(),
+                &Metrics::default(),
+            );
+            items
+                .iter()
+                .filter(|i| i.active > 0.5)
+                .map(|i| i.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lit(SelectionMode::Screen), [ElemId::ChipScreen]);
+        assert_eq!(lit(SelectionMode::Window), [ElemId::ChipWindow]);
+        assert_eq!(lit(SelectionMode::Area), [ElemId::ChipArea]);
+        assert!(pres(SelectionMode::Screen).same_layout(&pres(SelectionMode::Window)));
+    }
+
+    #[test]
+    fn tooltips_name_each_button_s_keys() {
+        let keys = Keys {
+            record: "⌥⇧S".into(),
+            paste: "⌥⇧V".into(),
+            tools: "⌥⇧".into(),
+        };
+        let tip =
+            |pres: &Pres, id| tip_of(pres, id, &keys).map(|(name, keys)| format!("{name} {keys}"));
+        let recording = |chips| Pres::Recording {
+            chips,
+            has_iphone: false,
+            mode: SelectionMode::Screen,
+            live: Rows::default(),
+            tools: Tools {
+                shown: true,
+                chosen: None,
+            },
+        };
+        let controls = recording(false);
+        assert_eq!(
+            tip(&controls, ElemId::Finish).as_deref(),
+            Some("Finish ⌥⇧S")
+        );
+        assert_eq!(tip(&controls, ElemId::ToolPen).as_deref(), Some("Pen ⌥⇧1"));
+        assert_eq!(tip(&controls, ElemId::ToolRect).as_deref(), Some("Box ⌥⇧4"));
+        // Cancel says what it does and has no keys while recording; the timer does nothing.
+        assert_eq!(tip(&controls, ElemId::Cancel), None);
+        assert_eq!(tip(&controls, ElemId::Lead), None);
+        // The switch chips have no keys; their ✕ is an icon, so it's named.
+        let chips = recording(true);
+        assert_eq!(tip(&chips, ElemId::ChipWindow), None);
+        assert_eq!(tip(&chips, ElemId::Close).as_deref(), Some("Cancel "));
+
+        let picker = |has_iphone| Pres::Selecting {
+            mode: SelectionMode::Area,
+            has_iphone,
+        };
+        assert_eq!(
+            tip(&picker(false), ElemId::ChipArea).as_deref(),
+            Some("Area 1")
+        );
+        assert_eq!(
+            tip(&picker(true), ElemId::ChipIphone).as_deref(),
+            Some("iPhone 4")
+        );
+        assert_eq!(
+            tip(&picker(false), ElemId::Record).as_deref(),
+            Some("Record ⌥⇧S")
+        );
+        assert_eq!(
+            tip(&picker(false), ElemId::Close).as_deref(),
+            Some("Cancel esc")
+        );
+
+        let done = Pres::Completed {
+            label: "Copied".into(),
+            routes: Vec::new(),
+        };
+        assert_eq!(tip(&done, ElemId::Paste).as_deref(), Some("Paste ⌥⇧V"));
+        assert_eq!(tip(&done, ElemId::Inspect), None);
+
+        // Without the tools' hotkeys (or a paste shortcut) a button says only its name, or nothing.
+        let none = Keys::default();
+        assert_eq!(
+            tip_of(&controls, ElemId::ToolLine, &none),
+            Some(("Line", String::new()))
+        );
+        assert_eq!(tip_of(&controls, ElemId::Finish, &none), None);
+        assert_eq!(tip_of(&done, ElemId::Paste, &none), None);
+    }
+
+    #[test]
     fn live_audio_adds_a_waveform_and_a_full_width_row_for_the_words() {
         let recording = |wave, caption| Pres::Recording {
             chips: false,
             has_iphone: false,
+            mode: SelectionMode::Screen,
             live: Rows { wave, caption },
             tools: Tools::default(),
         };
@@ -2350,6 +2523,7 @@ mod tests {
         let live = |caption| Pres::Recording {
             chips: false,
             has_iphone: false,
+            mode: SelectionMode::Screen,
             live: Rows {
                 wave: true,
                 caption,
@@ -2401,6 +2575,7 @@ mod tests {
         m.set_pres(Pres::Recording {
             chips: true,
             has_iphone: false,
+            mode: SelectionMode::Screen,
             live: Rows::default(),
             tools: Tools::default(),
         });

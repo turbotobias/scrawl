@@ -599,6 +599,25 @@ impl SelectionMode {
     }
 }
 
+/// Where the window, area or screen chosen last is kept (`rememberSelection`), beside the
+/// captures like `last-mode`.
+fn last_selection_path() -> Option<PathBuf> {
+    crate::handoff::builtin_captures_dir()
+        .parent()
+        .map(|dir| dir.join("last-selection.json"))
+}
+
+fn load_last_selection() -> Option<TargetInfo> {
+    let text = std::fs::read_to_string(last_selection_path()?).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn save_last_selection(target: &TargetInfo) {
+    if let (Some(path), Ok(json)) = (last_selection_path(), serde_json::to_string(target)) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum IslandPhase {
     Hidden,
@@ -745,6 +764,8 @@ pub struct ScrawlCoordinator {
     inbox: crate::inbox::Inbox,
     /// The mode the last recording used; the picker opens on it.
     last_mode: SelectionMode,
+    /// The window, area or screen chosen last (`rememberSelection`).
+    last_selection: Option<TargetInfo>,
     /// The picker opened on Area because the last recording was the iPhone and no phone had been
     /// seen yet: switch to the phone when discovery finds one, unless Kit picked a mode himself.
     open_iphone_when_found: bool,
@@ -832,6 +853,7 @@ impl ScrawlCoordinator {
             last_local_capture_ms: 0,
             inbox: crate::inbox::Inbox::load_default(),
             last_mode: SelectionMode::load_last_used(),
+            last_selection: load_last_selection(),
             open_iphone_when_found: false,
             onboarding: None,
             settings: None,
@@ -1228,7 +1250,7 @@ impl ScrawlCoordinator {
                 // Esc can cancel before the picker or a recording exists.
                 self.playback.take();
             }
-            Action::RecordScreen => self.record_screen_now(cx),
+            Action::RecordScreen => self.record_shortcut_target(cx),
             Action::RecordSelected => self.record_selected_mode(cx),
             Action::Finish => self.finish_recording(cx),
         }
@@ -1242,6 +1264,71 @@ impl ScrawlCoordinator {
             self.record_selected_mode(cx);
         } else if !self.is_processing() {
             self.record_screen_now(cx);
+        }
+    }
+
+    /// The record shortcut: with the `rememberSelection` experiment, the window, area or screen
+    /// chosen last, while it's still there (`capture::reuse_selection`); else the display under
+    /// the pointer. Either way it records straight away and the switch chips offer the others.
+    pub fn record_shortcut_target(&mut self, cx: &mut Context<Self>) {
+        use crate::capture::Reuse;
+        if self.lab || !crate::handoff::experiment("rememberSelection") {
+            self.record_screen_now(cx);
+            return;
+        }
+        let last = self.last_selection.clone();
+        let windows = if last
+            .as_ref()
+            .is_some_and(|t| matches!(t.mode, CaptureMode::Window | CaptureMode::Region))
+        {
+            list_selectable_windows()
+        } else {
+            Vec::new()
+        };
+        let target = match crate::capture::reuse_selection(
+            last.as_ref(),
+            &windows,
+            &crate::screens::displays(),
+        ) {
+            Reuse::Screen => discover_target(None),
+            Reuse::Window(window) => window,
+            Reuse::Area([x, y, w, h]) => region_target(x, y, w, h, &windows),
+        };
+        scrawl_log(format!(
+            "record shortcut -> {:?} (last chosen)",
+            target.mode
+        ));
+        self.start_recording_with_target(target, cx);
+        if self.is_recording() {
+            self.show_reveal(cx);
+        }
+    }
+
+    /// What the recording records, as the switch chip lit for it.
+    pub(crate) fn recording_mode(&self) -> SelectionMode {
+        match self.active_recording.as_ref().map(|r| r.target.mode) {
+            Some(CaptureMode::Window) => SelectionMode::Window,
+            Some(CaptureMode::Region) => SelectionMode::Area,
+            Some(CaptureMode::Device) => SelectionMode::Iphone,
+            Some(CaptureMode::Display) | None => SelectionMode::Screen,
+        }
+    }
+
+    /// Remembers the window, area or screen being recorded, for the next press of the shortcut
+    /// (`record_shortcut_target`).
+    fn remember_selection(&mut self, target: &TargetInfo) {
+        if !matches!(
+            target.mode,
+            CaptureMode::Display | CaptureMode::Window | CaptureMode::Region
+        ) {
+            return;
+        }
+        let same = self.last_selection.as_ref().is_some_and(|last| {
+            last == target || (last.mode == CaptureMode::Display && target.mode == last.mode)
+        });
+        if !same {
+            self.last_selection = Some(target.clone());
+            save_last_selection(target);
         }
     }
 
@@ -1324,7 +1411,8 @@ impl ScrawlCoordinator {
         if !self.is_recording() {
             return;
         }
-        if mode == SelectionMode::Screen {
+        let current = self.recording_mode();
+        if mode == SelectionMode::Screen && current == SelectionMode::Screen {
             self.fold_reveal();
             cx.notify();
             return;
@@ -1342,14 +1430,21 @@ impl ScrawlCoordinator {
             self.start_recording_iphone(cx);
             return;
         }
+        if mode == SelectionMode::Screen {
+            // A remembered window or area (`rememberSelection`) gives way to the screen.
+            self.fold_reveal();
+            drop(overlay);
+            self.start_recording_with_target(discover_target(None), cx);
+            return;
+        }
         // Window and Area: the chips stay up while the capsule morphs into the picker.
         // The recording's overlay becomes the picker's (moved if the picker opens on another
         // display), so the border never swaps windows (as the picker → recording path does).
         self.picker_metal_overlay = overlay;
         self.open_picker(Some(mode), cx);
         if self.is_selecting() && chips_shown && !self.reduced_motion {
-            // The chips showed Screen; the picker shows `mode`.
-            self.highlight_prev = Some(SelectionMode::Screen);
+            // The chips showed what was recorded; the picker shows `mode`.
+            self.highlight_prev = Some(current);
             self.highlight_since = motion::now();
             self.island_morph = Morph::Switch;
             self.switch = Some(SwitchMorph { slide: None });
@@ -1867,6 +1962,18 @@ impl ScrawlCoordinator {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(num);
                 }
+                // The tooltip: out of recordings, and clicks under it are the app's.
+                let tip = pill.tip_window_number();
+                if tip > 0 {
+                    for ids in [
+                        &self.telemetry.excluded_window_ids,
+                        &self.telemetry.passthrough_window_ids,
+                    ] {
+                        ids.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(tip);
+                    }
+                }
                 self.native_pill = Some(pill);
             }
             Err(err) => {
@@ -1891,6 +1998,7 @@ impl ScrawlCoordinator {
             IslandPhase::Recording => Pres::Recording {
                 chips: self.reveal.is_open(),
                 has_iphone,
+                mode: self.recording_mode(),
                 live: crate::live_audio::rows(),
                 tools: crate::native::pill::model::Tools {
                     shown: self.shape_tools,
@@ -1908,6 +2016,30 @@ impl ScrawlCoordinator {
             clock,
             reduced_motion: self.reduced_motion,
             style: PillStyle::current(),
+            keys: self.pill_keys(),
+        }
+    }
+
+    /// The shortcuts the capsule's tooltips name.
+    fn pill_keys(&self) -> crate::native::pill::model::Keys {
+        let (record, paste) = self.telemetry.shortcuts();
+        let label = |cfg: &crate::capture::ShortcutConfig| {
+            if cfg.is_unset() {
+                String::new()
+            } else {
+                cfg.label.clone()
+            }
+        };
+        crate::native::pill::model::Keys {
+            record: label(&record),
+            paste: label(&paste),
+            tools: if self.shape_tools {
+                crate::capture::modifiers_label(crate::capture::tool_modifiers(
+                    record.carbon_modifiers,
+                ))
+            } else {
+                String::new()
+            },
         }
     }
 
@@ -2546,6 +2678,7 @@ impl ScrawlCoordinator {
         if let IslandPhase::Selecting { mode } = self.island_phase {
             self.remember_mode(mode);
         }
+        self.remember_selection(&target);
         self.recording_shortcut_key = false;
         self.iphone_preview = None;
         self.selection_drag = None;
@@ -3146,6 +3279,7 @@ impl Render for HudPillWindow {
         let highlight_p = ease_out_cubic(motion::age(coord.highlight_since) / HIGHLIGHT_FADE_S);
         let clock = format_clock(elapsed_ms);
         let has_iphone = coord.iphone.is_some();
+        let lit = coord.recording_mode();
         let completed_note = coord.completed_note.clone();
         let routes = coord.route_chip_labels();
         // The Recording capsule's trailing group: switch chips or controls, and the swap between.
@@ -3601,7 +3735,13 @@ impl Render for HudPillWindow {
                         (fade > 0.002).then(|| {
                             let (out_alphas, _) = alphas(out_chips, fade);
                             traced(
-                                self.recording_trail(out_chips, has_iphone, &out_alphas, false),
+                                self.recording_trail(
+                                    out_chips,
+                                    has_iphone,
+                                    lit,
+                                    &out_alphas,
+                                    false,
+                                ),
                                 trail_keys(out_chips, has_iphone, &out_alphas, "out:"),
                             )
                         })
@@ -3617,7 +3757,7 @@ impl Render for HudPillWindow {
                             slot.child(div().absolute().left(px(0.0)).top(px(0.0)).child(group))
                         })
                         .child(traced(
-                            self.recording_trail(chips, has_iphone, &in_alphas, true),
+                            self.recording_trail(chips, has_iphone, lit, &in_alphas, true),
                             trail_keys(chips, has_iphone, &in_alphas, ""),
                         ))
                 })
@@ -3798,12 +3938,12 @@ impl SwitchLayout {
 
 impl HudPillWindow {
     /// One trailing group of the Recording capsule, each item faded by `alphas`: the switch chips
-    /// (Screen selected, as a tap records the screen) or Cancel · Finish. An outgoing
-    /// group isn't `interactive`.
+    /// (`lit`: what's being recorded) or Cancel · Finish. An outgoing group isn't `interactive`.
     fn recording_trail(
         &self,
         chips: bool,
         has_iphone: bool,
+        lit: SelectionMode,
         alphas: &[f32],
         interactive: bool,
     ) -> Div {
@@ -3813,7 +3953,7 @@ impl HudPillWindow {
             return group.children(SelectionMode::available(has_iphone).iter().enumerate().map(
                 |(i, &mode)| {
                     let c_switch = self.coordinator.clone();
-                    mode_segment(mode, mode == SelectionMode::Screen)
+                    mode_segment(mode, mode == lit)
                         .opacity(alpha(i))
                         .when(interactive, |d| {
                             d.on_click(move |_, _, cx| {

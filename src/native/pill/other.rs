@@ -20,6 +20,10 @@ impl NativePill {
         0
     }
 
+    pub fn tip_window_number(&self) -> u32 {
+        0
+    }
+
     pub fn place_on(&self, _point: [f64; 2]) {}
 
     pub fn sync(&self, _snapshot: PillSnapshot) {}

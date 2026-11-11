@@ -52,6 +52,10 @@ Off by default (see Experiments in `AGENTS.md`). With it on and Apple Speech the
 
 Off by default (see Experiments in `AGENTS.md`). Lines, arrows and boxes drawn with ⇧ (`docs/capture.md`). A shape's stroke is its outline with `"tool": "line" | "arrow" | "rect"` in `scrawl.json`; `sketch::marks_of` never groups it with other strokes and takes its shape from the tool rather than the path: a line or arrow from its start to the point furthest from it (an arrow's tip; `shapes::tip_of`), a box as `Shape::Box` (`boxed region …`, `boxed` in the agentContext text) over its bounds.
 
+## Experiment `rememberSelection` (`capture::reuse_selection`)
+
+Off by default (see Experiments in `AGENTS.md`). The record shortcut records the window, area or screen chosen last while it's still there (`docs/capture.md`), so a Window or Area capture's bundle comes from a press as it would from the picker: same `target`, no auto-crop of a full screen.
+
 ## Experiment `clipboardImage` (`src/handoff.rs`, `src/win/clipboard.rs`)
 
 Off by default; Windows only. A finished capture (and `scrawl send` to the clipboard) normally copies `summary.md`'s text alone, so pressing Ctrl+V yourself drops the contact sheet; only the Paste chip and the paste shortcut paste the image first. With it on, `copy_bundle_to_clipboard` puts `contact-sheet.png` (`PNG` and `CF_DIBV5`) and the text on the clipboard together, so one Ctrl+V attaches the image and inserts the text in a browser or Electron composer (checked in the Claude desktop app) and pastes just the text in a terminal. If the contact sheet can't be read, the text is copied alone.

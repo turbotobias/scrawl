@@ -450,6 +450,20 @@ pub(crate) fn tool_modifiers(record: u32) -> u32 {
     }
 }
 
+/// Carbon modifiers as macOS writes them (`⌃⌥⇧⌘`).
+pub(crate) fn modifiers_label(carbon: u32) -> String {
+    [
+        (CARBON_CONTROL_KEY, '⌃'),
+        (CARBON_OPTION_KEY, '⌥'),
+        (CARBON_SHIFT_KEY, '⇧'),
+        (CARBON_CMD_KEY, '⌘'),
+    ]
+    .into_iter()
+    .filter(|(flag, _)| carbon & flag != 0)
+    .map(|(_, symbol)| symbol)
+    .collect()
+}
+
 pub(crate) fn hotkey_combos(kind: ShortcutKind, cfg: &ShortcutConfig) -> Vec<(u32, u32)> {
     if cfg.is_unset() {
         return Vec::new();
@@ -577,6 +591,60 @@ pub fn region_target(
             height,
             scale,
         },
+    }
+}
+
+/// What a press of the record shortcut records with the `rememberSelection` experiment.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Reuse {
+    /// The display under the pointer, as without a remembered choice.
+    Screen,
+    Window(TargetInfo),
+    /// An area, global points.
+    Area([f64; 4]),
+}
+
+/// The window, area or screen last chosen (`last`), if it's still there: the same window, else
+/// the front window of its app (reopened, or a new one), and an area while a display holds its
+/// centre.
+/// Anything else records the screen, so a press always records straight away.
+pub fn reuse_selection(
+    last: Option<&TargetInfo>,
+    windows: &[TargetInfo],
+    screens: &[crate::screens::Screen],
+) -> Reuse {
+    let Some(last) = last else {
+        return Reuse::Screen;
+    };
+    match last.mode {
+        CaptureMode::Window => {
+            let same_app = |w: &&TargetInfo| {
+                last.bundle_id
+                    .as_deref()
+                    .is_some_and(|id| !id.is_empty() && w.bundle_id.as_deref() == Some(id))
+            };
+            windows
+                .iter()
+                .find(|w| w.window_id.is_some() && w.window_id == last.window_id)
+                .or_else(|| windows.iter().find(same_app))
+                .cloned()
+                .map_or(Reuse::Screen, Reuse::Window)
+        }
+        CaptureMode::Region => {
+            let f = last.frame;
+            let rect = [f.x, f.y, f.width, f.height];
+            let centre = [f.x + f.width / 2.0, f.y + f.height / 2.0];
+            let on_a_display = screens.iter().any(|s| {
+                let [x, y, w, h] = s.frame;
+                (x..x + w).contains(&centre[0]) && (y..y + h).contains(&centre[1])
+            });
+            if on_a_display {
+                Reuse::Area(rect)
+            } else {
+                Reuse::Screen
+            }
+        }
+        CaptureMode::Display | CaptureMode::Device => Reuse::Screen,
     }
 }
 
@@ -2312,6 +2380,78 @@ mod tests {
             in_stacking_order(listed, &[]).len(),
             3,
             "no window list: keep them all"
+        );
+    }
+
+    #[test]
+    fn the_shortcut_records_the_last_window_area_or_screen_while_it_is_still_there() {
+        let frame = |x: f64, y: f64, width: f64, height: f64| TargetFrame {
+            x,
+            y,
+            width,
+            height,
+            scale: 2.0,
+        };
+        let window = |id: u32, app: &str| TargetInfo {
+            mode: CaptureMode::Window,
+            app: Some(app.to_owned()),
+            bundle_id: Some(format!("com.example.{app}")),
+            window_title: None,
+            window_id: Some(id),
+            display_id: 1,
+            frame: frame(100.0, 100.0, 800.0, 600.0),
+        };
+        let screens = [crate::screens::Screen {
+            id: 1,
+            frame: [0.0, 0.0, 1440.0, 900.0],
+            visible: [0.0, 25.0, 1440.0, 875.0],
+            scale: 2.0,
+            safe_top: 0.0,
+        }];
+        let open = [window(5, "safari"), window(8, "xcode"), window(9, "xcode")];
+        let id = |reuse: Reuse| match reuse {
+            Reuse::Window(w) => w.window_id,
+            _ => None,
+        };
+
+        assert_eq!(reuse_selection(None, &open, &screens), Reuse::Screen);
+        // The same window, wherever it is in the list.
+        assert_eq!(
+            id(reuse_selection(Some(&window(9, "xcode")), &open, &screens)),
+            Some(9)
+        );
+        // Closed: its app's front window; no window of that app: the screen.
+        assert_eq!(
+            id(reuse_selection(Some(&window(4, "xcode")), &open, &screens)),
+            Some(8)
+        );
+        assert_eq!(
+            reuse_selection(Some(&window(4, "notes")), &open, &screens),
+            Reuse::Screen
+        );
+
+        let area = |x: f64| TargetInfo {
+            mode: CaptureMode::Region,
+            frame: frame(x, 200.0, 300.0, 200.0),
+            window_id: None,
+            ..window(0, "safari")
+        };
+        assert_eq!(
+            reuse_selection(Some(&area(40.0)), &open, &screens),
+            Reuse::Area([40.0, 200.0, 300.0, 200.0])
+        );
+        // Its display was unplugged.
+        assert_eq!(
+            reuse_selection(Some(&area(3000.0)), &open, &screens),
+            Reuse::Screen
+        );
+        let display = TargetInfo {
+            mode: CaptureMode::Display,
+            ..area(0.0)
+        };
+        assert_eq!(
+            reuse_selection(Some(&display), &open, &screens),
+            Reuse::Screen
         );
     }
 }
