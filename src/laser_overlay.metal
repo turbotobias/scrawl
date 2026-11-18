@@ -13,7 +13,8 @@ struct LaserUniforms {
     float constrain_rect;
     float _pad1;
     float4 target_rect;
-    // x: 1 when a full-screen recording started straight from the shortcut (no picker).
+    // x: 1 when a recording started straight from the shortcut (no picker). y: how many
+    // `covers` there are.
     float4 glow;
     uint tile_cols;
     uint tile_rows;
@@ -70,7 +71,10 @@ fragment float4 laser_fragment(
     const device PathSegment *segments [[buffer(1)]],
     const device PinMarker *pins [[buffer(2)]],
     // `tile_cols * tile_rows + 1` offsets, then each tile's segment indices (`bin_segments`).
-    const device uint *tiles [[buffer(3)]]
+    const device uint *tiles [[buffer(3)]],
+    // The parts of the chosen window other windows cover (`windows::covers_of`), `glow.y` of
+    // them: what shows there isn't what's recorded.
+    constant float4 *covers [[buffer(4)]]
 ) {
     // Pixel position in logical screen points (top-left origin).
     float2 p = (in.uv * u.resolution) / max(u.scale, 1.0);
@@ -177,8 +181,26 @@ fragment float4 laser_fragment(
             out.a = dim_a;
         }
 
+        // 1b. Inside it but under another window: darker and hatched, so it's plain the window
+        //     on top there isn't the one chosen or recorded.
+        float covered = 0.0;
+        uint cover_count = uint(u.glow.y + 0.5);
+        for (uint i = 0; i < cover_count; i++) {
+            float2 lo = covers[i].xy;
+            float2 hi = lo + covers[i].zw;
+            float2 d2 = max(lo - p, p - hi);
+            covered = max(covered, clamp(0.5 - max(d2.x, d2.y), 0.0, 1.0));
+        }
+        covered *= 1.0 - out_cov;
+        if (covered > 0.001) {
+            float stripe = step(fract((p.x + p.y) / 14.0), 0.3);
+            float cover_a = covered * (0.46 + 0.16 * stripe) * picker_fade;
+            out.rgb = float3(0.0);
+            out.a = max(out.a, cover_a);
+        }
+
         // 2. Inside the selected window (`sdf <= 0.0`): dissolve the picker's blue tint (`0x3b5cf621`).
-        float in_cov = 1.0 - out_cov;
+        float in_cov = (1.0 - out_cov) * (1.0 - covered);
         if (in_cov > 0.001 && is_window && intro_fade > 0.002) {
             float fill_a = in_cov * 0.13 * intro_fade * picker_fade;
             float3 fill_col = float3(0.231, 0.361, 0.965);
@@ -198,6 +220,17 @@ fragment float4 laser_fragment(
                 float border_alpha = border_cov * mix(is_window ? 0.93 : 0.92, 0.28, intro_ease) * picker_fade;
                 out.rgb = border_col * border_alpha + out.rgb * (1.0 - border_alpha);
                 out.a = border_alpha + out.a * (1.0 - border_alpha);
+            }
+            // 4. Started from the shortcut: a red glow along the inside of the window's or
+            //    area's edges, as the screen's, so the start shows what's recorded.
+            if (u.glow.x > 0.5) {
+                float env = smoothstep(0.0, 0.12, u.now_sec) * (1.0 - smoothstep(0.35, 1.1, u.now_sec));
+                float glow_a = (1.0 - out_cov) * exp(min(sdf, 0.0) / 16.0) * 0.5 * env;
+                if (glow_a > 0.002) {
+                    float3 glow_col = float3(1.0, 0.23, 0.19);
+                    out.rgb = glow_col * glow_a + out.rgb * (1.0 - glow_a);
+                    out.a = glow_a + out.a * (1.0 - glow_a);
+                }
             }
         }
     } else if (u._pad1 < -0.0001) {

@@ -344,6 +344,7 @@ struct PillRuntimeState {
     place: Place,
     drag: Option<Drag>,
     tip: tip::Tip,
+    banner: tip::Banner,
     /// The shortcuts the tooltips name.
     keys: model::Keys,
 }
@@ -373,7 +374,7 @@ pub struct NativePill {
     display_link_ctx: Option<*const SharedNativePill>,
     action_rx: flume::Receiver<PillAction>,
     window_num: u32,
-    tip_window_num: u32,
+    label_window_nums: [u32; 2],
 }
 
 impl NativePill {
@@ -459,7 +460,8 @@ impl NativePill {
         }
         let window_num = window.windowNumber().max(0) as u32;
         let tip = tip::Tip::open(mtm);
-        let tip_window_num = tip.window_number();
+        let banner = tip::Banner::open(mtm);
+        let label_window_nums = [tip.window_number(), banner.window_number()];
 
         let shared = Arc::new(SharedNativePill {
             state: Mutex::new(PillRuntimeState {
@@ -484,6 +486,7 @@ impl NativePill {
                 place,
                 drag: None,
                 tip,
+                banner,
                 keys: model::Keys::default(),
             }),
             tick_queued: AtomicBool::new(false),
@@ -516,7 +519,7 @@ impl NativePill {
             display_link_ctx,
             action_rx,
             window_num,
-            tip_window_num,
+            label_window_nums,
         })
     }
 
@@ -524,9 +527,30 @@ impl NativePill {
         self.window_num
     }
 
-    /// The buttons' tooltip panel, kept out of recordings like the capsule.
-    pub fn tip_window_number(&self) -> u32 {
-        self.tip_window_num
+    /// The tooltip's and the start banner's panels, kept out of recordings like the capsule.
+    pub fn label_window_numbers(&self) -> [u32; 2] {
+        self.label_window_nums
+    }
+
+    /// Names what a recording that's starting records ("Recording" and `detail`) for a moment at
+    /// the top of `rect` (global points; `screen`: a whole display, so below the capsule).
+    pub fn announce(&self, detail: &str, rect: [f64; 4], screen: bool) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let screens = crate::screens::current();
+        let centre = [rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5];
+        let visible = crate::screens::index_at(&screens, centre)
+            .or_else(|| crate::screens::index_for_rect(&screens, rect))
+            .map_or(rect, |i| screens[i].visible);
+        if let Ok(mut st) = self.shared.state.lock() {
+            let place = tip::Place {
+                rect,
+                screen,
+                visible,
+            };
+            st.banner.show(mtm, "Recording", detail, place);
+        }
     }
 
     /// Moves the capsule to the screen holding `point` (global points, top-left origin), below
@@ -590,6 +614,10 @@ impl NativePill {
                     st.window.setLevel(NSStatusWindowLevel + 5);
                     st.window.orderFrontRegardless();
                     st.tip.order_front();
+                    st.banner.order_front();
+                }
+                if !matches!(st.model.pres, Pres::Recording { .. }) {
+                    st.banner.hide();
                 }
             }
             if (motion::now() - st.last_tick_now) >= f64::from(0.045 * motion::time_scale()) {
@@ -630,6 +658,7 @@ impl Drop for NativePill {
             st.window.orderOut(None);
             st.window.close();
             st.tip.close();
+            st.banner.close();
         }
         if let Some(ctx) = self.display_link_ctx {
             unsafe { drop(Arc::from_raw(ctx)) };
@@ -758,6 +787,7 @@ impl SharedNativePill {
         st.poll_pointer_and_input();
         st.poll_live();
         st.update_tip();
+        st.banner.update();
 
         let now = motion::now();
         let raw_dt = (now - st.last_tick_now).max(0.0) as f32;

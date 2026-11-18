@@ -459,6 +459,9 @@ objc2::define_class!(
             if let Some(item) = menu.itemWithTag(RECORD_MENU_TAG) {
                 item.setTitle(&NSString::from_str(&record_menu_title()));
             }
+            if let Some(item) = menu.itemWithTag(CHOOSE_MENU_TAG) {
+                item.setTitle(&NSString::from_str(&choose_menu_title()));
+            }
             if let Some(item) = menu.itemWithTag(EXPORT_VIDEO_MENU_TAG) {
                 item.setHidden(!crate::handoff::video_export());
             }
@@ -472,13 +475,40 @@ const INBOX_MENU_TAG: isize = 0x5c4a;
 const EXPORT_VIDEO_MENU_TAG: isize = 0x5c4e;
 /// Tag on **Record Screen**, whose title carries the record shortcut.
 const RECORD_MENU_TAG: isize = 0x5c4d;
+/// Tag on **Choose What to Record…**, whose title carries the double press.
+const CHOOSE_MENU_TAG: isize = 0x5c4f;
 
 /// "Record Screen" with the record shortcut as it is now (Settings can change it).
+/// With `rememberSelection` it names what the shortcut records now: the app of the window, the
+/// area, the screen or the iPhone chosen last.
 fn record_menu_title() -> String {
+    let what = if crate::handoff::experiment("rememberSelection") {
+        super::load_last_selection().map_or_else(
+            || "Screen".to_owned(),
+            |last| match last.mode {
+                crate::model::CaptureMode::Window => last.app.unwrap_or_else(|| "Window".into()),
+                crate::model::CaptureMode::Region => "Area".to_owned(),
+                crate::model::CaptureMode::Display => "Screen".to_owned(),
+                crate::model::CaptureMode::Device => "iPhone".to_owned(),
+            },
+        )
+    } else {
+        "Screen".to_owned()
+    };
     format!(
-        "Record Screen  {}",
+        "Record {what}  {}",
         crate::settings::Shortcuts::load().record.label
     )
+}
+
+/// The picker, with the shortcut's double press that opens it too.
+fn choose_menu_title() -> String {
+    let record = crate::settings::Shortcuts::load().record;
+    if record.is_unset() || !crate::handoff::experiment("rememberSelection") {
+        "Choose What to Record…".to_owned()
+    } else {
+        format!("Choose What to Record…  {} twice", record.label)
+    }
 }
 
 /// Lists unhandled iPhone captures at the top of the status menu, read fresh from disk so the
@@ -623,7 +653,10 @@ pub(super) fn install_status_bar() -> Option<flume::Receiver<MenuAction>> {
     if let Some(item) = menu.itemAtIndex(menu.numberOfItems() - 1) {
         item.setTag(RECORD_MENU_TAG);
     }
-    add("Choose What to Record…", sel!(chooseTarget:));
+    add(&choose_menu_title(), sel!(chooseTarget:));
+    if let Some(item) = menu.itemAtIndex(menu.numberOfItems() - 1) {
+        item.setTag(CHOOSE_MENU_TAG);
+    }
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     add("Open Latest Capture", sel!(openLatest:));
     add("Export Last Capture as Video…", sel!(exportVideo:));

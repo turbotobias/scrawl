@@ -386,6 +386,9 @@ pub fn list_selectable_windows() -> Vec<TargetInfo> {
         .collect()
 }
 
+/// A recorded window comes to the front on macOS; Windows keeps the window order as it is.
+pub fn bring_to_front(_id: u32) {}
+
 /// Top-level windows as the window log and click attribution read them.
 pub(super) fn raw_windows_now() -> Vec<crate::windows::RawWindow> {
     crate::windows::raw_windows()

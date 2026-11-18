@@ -1,8 +1,11 @@
 //! The capture shortcut. Press ⌥⇧S, briefly or held, and the display under the pointer starts
 //! recording as the keys come up; the recording's capsule shows Area · Window · Screen · iPhone
-//! as chips for a few seconds (`Reveal`), so the target can still change.
+//! as chips for a few seconds (`Reveal`), so the target can still change. With the
+//! `rememberSelection` experiment, pressing it twice (S twice with ⌥⇧ held, or ⌥⇧S twice
+//! quickly) chooses what to record in the picker instead.
 
-/// A press this soon after a recording starts is a double press, not "finish".
+/// A press this soon after a recording starts is a double press, not "finish" (it opens the
+/// picker with `double_press_chooses`).
 pub const DOUBLE_PRESS_MS: u64 = 400;
 
 /// What Scrawl is doing when the shortcut goes down.
@@ -27,6 +30,8 @@ pub enum Action {
     Cancel,
     /// The picker is open: record what it is on.
     RecordSelected,
+    /// A double press: open the picker, dropping the recording it may have just started.
+    Choose,
     Finish,
 }
 
@@ -35,6 +40,9 @@ pub enum Action {
 pub struct Shortcut {
     /// ⌥⇧S went down and its modifiers aren't all up yet.
     pending: bool,
+    /// A double press opens the picker (the `rememberSelection` experiment); without it one is
+    /// ignored.
+    pub double_press_chooses: bool,
 }
 
 impl Shortcut {
@@ -45,11 +53,22 @@ impl Shortcut {
 
     /// The shortcut went down.
     pub fn press(&mut self, activity: Activity) -> Action {
+        // S again with ⌥⇧ still down.
         if self.pending {
+            if self.double_press_chooses {
+                self.pending = false;
+                return Action::Choose;
+            }
             return Action::None;
         }
         match activity {
-            Activity::Recording { elapsed_ms } if elapsed_ms < DOUBLE_PRESS_MS => Action::None,
+            Activity::Recording { elapsed_ms } if elapsed_ms < DOUBLE_PRESS_MS => {
+                if self.double_press_chooses {
+                    Action::Choose
+                } else {
+                    Action::None
+                }
+            }
             Activity::Recording { .. } => Action::Finish,
             Activity::Processing => Action::None,
             Activity::Picker => Action::RecordSelected,
@@ -168,9 +187,32 @@ mod tests {
         for _ in 0..500 {
             assert_eq!(s.tick(true), Action::None);
         }
-        // S pressed again while ⌥⇧ is still down changes nothing.
+        // S pressed again while ⌥⇧ is still down changes nothing (without the experiment).
         assert_eq!(s.press(FREE), Action::None);
         assert_eq!(s.tick(false), Action::RecordScreen);
+    }
+
+    #[test]
+    fn pressing_it_twice_chooses_what_to_record() {
+        // S twice with ⌥⇧ held: the picker, and letting go records nothing.
+        let chooses = || Shortcut {
+            double_press_chooses: true,
+            ..Shortcut::default()
+        };
+        let mut s = chooses();
+        s.press(FREE);
+        assert_eq!(s.tick(true), Action::None);
+        assert_eq!(s.press(FREE), Action::Choose);
+        assert!(!s.is_pending());
+        assert_eq!(s.tick(false), Action::None);
+        // ⌥⇧S twice: the second press lands on the recording the first just started.
+        let mut s = chooses();
+        s.press(FREE);
+        assert_eq!(s.tick(false), Action::RecordScreen);
+        assert_eq!(
+            s.press(Activity::Recording { elapsed_ms: 150 }),
+            Action::Choose
+        );
     }
 
     #[test]

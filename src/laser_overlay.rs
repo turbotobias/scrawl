@@ -271,6 +271,43 @@ extern "C" fn display_link_callback(
 struct SharedMetalOverlay {
     telemetry: Arc<SharedCaptureTelemetry>,
     renderer: Mutex<MetalLaserRenderer>,
+    covers: Mutex<Covers>,
+}
+
+/// What covers the chosen window (`windows::covers_of`, global points), looked up at most every
+/// `COVERS_EVERY`.
+#[derive(Default)]
+struct Covers {
+    window: u32,
+    at: Option<std::time::Instant>,
+    rects: Vec<[f32; 4]>,
+}
+
+/// The window server's list takes a millisecond or two, so the covers are looked up 6 times a
+/// second, not every frame.
+const COVERS_EVERY: std::time::Duration = std::time::Duration::from_millis(160);
+/// The shader takes at most this many covers (`set_fragment_bytes`, 16 B each).
+const MAX_COVERS: usize = 16;
+
+impl SharedMetalOverlay {
+    /// What covers window `window` now (global points).
+    fn covers(&self, window: u32) -> Vec<[f32; 4]> {
+        let mut covers = self
+            .covers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if covers.window != window || covers.at.is_none_or(|at| at.elapsed() >= COVERS_EVERY) {
+            let raw = objc2::rc::autoreleasepool(|_| crate::windows::raw_windows());
+            let own = std::process::id() as i32;
+            covers.rects = crate::windows::covers_of(&raw, window, own, MAX_COVERS)
+                .into_iter()
+                .map(|r| r.map(|v| v as f32))
+                .collect();
+            covers.window = window;
+            covers.at = Some(std::time::Instant::now());
+        }
+        covers.rects.clone()
+    }
 }
 
 unsafe impl Send for SharedMetalOverlay {}
@@ -327,6 +364,7 @@ impl SharedMetalOverlay {
                 height,
                 scale,
             }),
+            covers: Mutex::new(Covers::default()),
         })
     }
 
@@ -422,6 +460,16 @@ impl SharedMetalOverlay {
             (tx, ty, tw, th, constrained, mode)
         };
         let [ox, oy] = self.origin();
+        let focus = self.telemetry.focus_window.load(Ordering::Acquire);
+        let covers: Vec<[f32; 4]> = if is_constrained && (mode_code - 2.0).abs() < 0.5 && focus != 0
+        {
+            self.covers(focus)
+                .into_iter()
+                .map(|[x, y, w, h]| [x - ox, y - oy, w, h])
+                .collect()
+        } else {
+            Vec::new()
+        };
         let (tx, ty) = (tx - ox, ty - oy);
         let to_screen = |nx: f32, ny: f32| -> [f32; 2] { [tx + nx * tw, ty + ny * th] };
 
@@ -580,7 +628,7 @@ impl SharedMetalOverlay {
                     f32::from(u8::from(
                         is_active && self.telemetry.start_glow.load(Ordering::Acquire),
                     )),
-                    0.0,
+                    covers.len() as f32,
                     0.0,
                     0.0,
                 ],
@@ -589,7 +637,7 @@ impl SharedMetalOverlay {
                 tile_size: TILE_PT,
                 _pad2: 0.0,
             };
-            let frame = ShownFrame::new(uniforms, &segments, &pins);
+            let frame = ShownFrame::new(uniforms, &segments, &pins, &covers);
             if renderer.shown.as_ref() == Some(&frame) {
                 return None;
             }
@@ -611,6 +659,7 @@ impl SharedMetalOverlay {
                 &uniforms,
                 &segments,
                 &pins,
+                &covers,
             );
             cmd.present_drawable(drawable);
             cmd.commit();
@@ -686,10 +735,16 @@ struct ShownFrame {
     uniforms: LaserUniforms,
     segments: Vec<PathSegment>,
     pins: Vec<PinMarker>,
+    covers: Vec<[f32; 4]>,
 }
 
 impl ShownFrame {
-    fn new(uniforms: LaserUniforms, segments: &[PathSegment], pins: &[PinMarker]) -> Self {
+    fn new(
+        uniforms: LaserUniforms,
+        segments: &[PathSegment],
+        pins: &[PinMarker],
+        covers: &[[f32; 4]],
+    ) -> Self {
         Self {
             uniforms: LaserUniforms {
                 // Past the intro, time only changes pixels through the segments.
@@ -704,6 +759,7 @@ impl ShownFrame {
             },
             segments: segments[..uniforms.segment_count as usize].to_vec(),
             pins: pins[..uniforms.pin_count as usize].to_vec(),
+            covers: covers.to_vec(),
         }
     }
 }
@@ -791,6 +847,7 @@ fn encode_overlay(
     uniforms: &LaserUniforms,
     segments: &[PathSegment],
     pins: &[PinMarker],
+    covers: &[[f32; 4]],
 ) {
     let enc = cmd.new_render_command_encoder(pass);
     enc.set_render_pipeline_state(pipeline);
@@ -825,6 +882,13 @@ fn encode_overlay(
         MTLResourceOptions::StorageModeShared,
     );
     enc.set_fragment_buffer(3, Some(&tile_buffer), 0);
+    // The shader reads `glow[1]` of them; with none it still needs something bound.
+    let covers = if covers.is_empty() {
+        &[[0.0; 4]][..]
+    } else {
+        &covers[..covers.len().min(MAX_COVERS)]
+    };
+    enc.set_fragment_bytes(4, size_of_val(covers) as u64, covers.as_ptr().cast());
     enc.draw_primitives(MTLPrimitiveType::Triangle, 0, 3);
     enc.end_encoding();
 }
@@ -859,6 +923,7 @@ mod tests {
         uniforms: &LaserUniforms,
         segments: &[PathSegment],
         pins: &[PinMarker],
+        covers: &[[f32; 4]],
     ) -> Option<Vec<u8>> {
         let device = metal::Device::system_default()?;
         let pipelines = OverlayPipelines::new(&device).expect("pipelines");
@@ -886,7 +951,9 @@ mod tests {
         attachment.set_store_action(MTLStoreAction::Store);
         let queue = device.new_command_queue();
         let cmd = queue.new_command_buffer();
-        encode_overlay(cmd, pass, &device, pipeline, uniforms, segments, pins);
+        encode_overlay(
+            cmd, pass, &device, pipeline, uniforms, segments, pins, covers,
+        );
         cmd.commit();
         cmd.wait_until_completed();
         let mut pixels = vec![0u8; (w * h * 4) as usize];
@@ -936,6 +1003,7 @@ mod tests {
             &uniforms,
             &segments,
             &[PinMarker::default()],
+            &[],
         ) else {
             return;
         };
@@ -977,9 +1045,13 @@ mod tests {
                 tile_size: TILE_PT,
                 ..Default::default()
             };
-            let Some(pixels) =
-                render_offscreen(Shader::Picked, &uniforms, &[PathSegment::default()], &[pin])
-            else {
+            let Some(pixels) = render_offscreen(
+                Shader::Picked,
+                &uniforms,
+                &[PathSegment::default()],
+                &[pin],
+                &[],
+            ) else {
                 return;
             };
             let max_alpha = pixels.chunks_exact(4).map(|p| p[3]).max().unwrap_or(0);
@@ -1054,7 +1126,7 @@ mod tests {
             ..LaserUniforms::default()
         };
         let pins = [PinMarker::default()];
-        let Some(tiled) = render_offscreen(Shader::Picked, &uniforms, &segments, &pins) else {
+        let Some(tiled) = render_offscreen(Shader::Picked, &uniforms, &segments, &pins, &[]) else {
             return;
         };
         // One tile bigger than the screen holds every segment.
@@ -1068,6 +1140,7 @@ mod tests {
             },
             &segments,
             &pins,
+            &[],
         )
         .unwrap();
         assert!(tiled.iter().any(|&b| b != 0), "the scene draws something");
@@ -1160,6 +1233,7 @@ mod tests {
                     &uniforms,
                     &segments,
                     &[PinMarker::default()],
+                    &[],
                 );
                 cmd.commit();
                 cmd.wait_until_completed();
@@ -1179,6 +1253,93 @@ mod tests {
                 frame_ms[frame_ms.len() - 1],
             );
         }
+    }
+
+    /// A window recording (or the picker on a window) with another window over part of it: that
+    /// part is darker than the rest of the window and hatched, and the start glow runs along the
+    /// inside of the window's edges.
+    #[test]
+    fn what_covers_the_chosen_window_is_marked_and_the_start_glows_on_its_edges() {
+        let (w, h) = (400.0_f32, 300.0_f32);
+        let window = LaserUniforms {
+            constrain_rect: 1.0,
+            _pad1: 2.0,
+            target_rect: [50.0, 50.0, 300.0, 200.0],
+            ..recording_uniforms(w, h, 1.0)
+        };
+        let cover = [[200.0_f32, 50.0, 150.0, 200.0]];
+        let covered = LaserUniforms {
+            glow: [0.0, 1.0, 0.0, 0.0],
+            ..window
+        };
+        let none = [PathSegment::default()];
+        let pins = [PinMarker::default()];
+        let Some(pixels) = render_offscreen(Shader::Picked, &covered, &none, &pins, &cover) else {
+            return;
+        };
+        let alpha = |px: &[u8], x: u32, y: u32| px[((y * w as u32 + x) * 4 + 3) as usize];
+        // Clear where the window shows, dimmed outside it, darker where it's covered.
+        assert!(alpha(&pixels, 120, 150) < 4, "{}", alpha(&pixels, 120, 150));
+        let outside = alpha(&pixels, 20, 20);
+        let under = (200..340)
+            .map(|x| alpha(&pixels, x, 150))
+            .collect::<Vec<_>>();
+        assert!(under.iter().all(|a| *a > outside), "{outside} {under:?}");
+        let (lo, hi) = (under.iter().min().unwrap(), under.iter().max().unwrap());
+        assert!(hi - lo > 20, "hatched: {lo}..{hi}");
+        // `SCRAWL_COVER_STILL=PATH`: the frame over a pretend desktop, the chosen window (white)
+        // and one covering its right half (blue).
+        if let Some(path) = std::env::var_os("SCRAWL_COVER_STILL") {
+            let mut rgba = Vec::with_capacity(pixels.len());
+            for y in 0..h as u32 {
+                for x in 0..w as u32 {
+                    let (fx, fy) = (x as f32, y as f32);
+                    let inside = |[rx, ry, rw, rh]: [f32; 4]| {
+                        fx >= rx && fx < rx + rw && fy >= ry && fy < ry + rh
+                    };
+                    let under = if inside(cover[0]) {
+                        [90.0, 140.0, 230.0]
+                    } else if inside(covered.target_rect) {
+                        [245.0, 245.0, 245.0]
+                    } else {
+                        [150.0, 160.0, 150.0]
+                    };
+                    let i = ((y * w as u32 + x) * 4) as usize;
+                    let a = f32::from(pixels[i + 3]) / 255.0;
+                    let over = [pixels[i + 2], pixels[i + 1], pixels[i]].map(f32::from);
+                    for c in 0..3 {
+                        rgba.push((over[c] + under[c] * (1.0 - a)).round().min(255.0) as u8);
+                    }
+                    rgba.push(255);
+                }
+            }
+            let frame = crate::model::RgbaFrame {
+                t_ms: 0,
+                width: w as u32,
+                height: h as u32,
+                rgba,
+                badge_top_right: false,
+            };
+            crate::render::save_png(&frame, std::path::Path::new(&path)).unwrap();
+        }
+        // No covers: the same window reads clear all through.
+        let plain = render_offscreen(Shader::Picked, &window, &none, &pins, &[]).unwrap();
+        assert!(alpha(&plain, 300, 150) < 4);
+
+        // Just started from the shortcut: red along the inside of its edges, not in the middle.
+        let start = LaserUniforms {
+            now_sec: 0.4,
+            glow: [1.0, 0.0, 0.0, 0.0],
+            ..window
+        };
+        let glowing = render_offscreen(Shader::Picked, &start, &none, &pins, &[]).unwrap();
+        let px = |x: u32, y: u32| {
+            let i = ((y * w as u32 + x) * 4) as usize;
+            [glowing[i + 2], glowing[i + 1], glowing[i], glowing[i + 3]]
+        };
+        let edge = px(53, 150);
+        assert!(edge[3] > 60 && edge[0] > edge[1], "{edge:?}");
+        assert!(px(200, 150)[3] < 10, "{:?}", px(200, 150));
     }
 
     /// A settled full-screen recording on a `width`×`height` @`scale` screen, with no ink.
@@ -1347,11 +1508,13 @@ mod tests {
     fn specialised_frames_match_the_general_shader() {
         for scale in [1.0, 2.0] {
             for (name, uniforms, segments, pins) in frame_kinds(256.0, 192.0, scale) {
-                let Some(expected) = render_offscreen(Shader::General, &uniforms, &segments, &pins)
+                let Some(expected) =
+                    render_offscreen(Shader::General, &uniforms, &segments, &pins, &[])
                 else {
                     return;
                 };
-                let actual = render_offscreen(Shader::Picked, &uniforms, &segments, &pins).unwrap();
+                let actual =
+                    render_offscreen(Shader::Picked, &uniforms, &segments, &pins, &[]).unwrap();
                 assert!(
                     name == "nothing drawn" || expected.iter().any(|&b| b != 0),
                     "{name} @{scale}x draws something"
@@ -1393,11 +1556,11 @@ mod tests {
             segment_count: segments.len() as u32,
             ..recording_uniforms(256.0, 192.0, 2.0)
         };
-        let shown = ShownFrame::new(base, &segments, &pins);
+        let shown = ShownFrame::new(base, &segments, &pins, &[]);
         let frame = |change: fn(&mut LaserUniforms)| {
             let mut uniforms = base;
             change(&mut uniforms);
-            ShownFrame::new(uniforms, &segments, &pins)
+            ShownFrame::new(uniforms, &segments, &pins, &[])
         };
         assert!(
             shown == frame(|u| u.now_sec = 9.0),
@@ -1420,11 +1583,14 @@ mod tests {
 
         let mut faded = segments.clone();
         faded[0].width = 0.5;
-        assert!(shown != ShownFrame::new(base, &faded, &pins), "ink fading");
+        assert!(
+            shown != ShownFrame::new(base, &faded, &pins, &[]),
+            "ink fading"
+        );
         let mut beyond = segments.clone();
         beyond.push(PathSegment::default());
         assert!(
-            shown == ShownFrame::new(base, &beyond, &pins),
+            shown == ShownFrame::new(base, &beyond, &pins, &[]),
             "segments past the count"
         );
     }
@@ -1447,7 +1613,7 @@ mod tests {
             };
             let pins = [pin.unwrap_or_default()];
             (
-                ShownFrame::new(uniforms, &[PathSegment::default()], &pins),
+                ShownFrame::new(uniforms, &[PathSegment::default()], &pins, &[]),
                 uniforms,
                 pins,
             )
@@ -1475,9 +1641,13 @@ mod tests {
         );
 
         let (_, uniforms, pins) = frame_at(last);
-        let Some(pixels) =
-            render_offscreen(Shader::Picked, &uniforms, &[PathSegment::default()], &pins)
-        else {
+        let Some(pixels) = render_offscreen(
+            Shader::Picked,
+            &uniforms,
+            &[PathSegment::default()],
+            &pins,
+            &[],
+        ) else {
             return;
         };
         assert!(
@@ -1532,7 +1702,16 @@ mod tests {
                     attachment.set_store_action(MTLStoreAction::Store);
                     let pipeline = if which == 0 { &general } else { specialised };
                     let cmd = queue.new_command_buffer();
-                    encode_overlay(cmd, pass, &device, pipeline, &uniforms, &segments, &pins);
+                    encode_overlay(
+                        cmd,
+                        pass,
+                        &device,
+                        pipeline,
+                        &uniforms,
+                        &segments,
+                        &pins,
+                        &[],
+                    );
                     cmd.commit();
                     cmd.wait_until_completed();
                     if round >= 2 {

@@ -20,9 +20,11 @@ impl NativePill {
         0
     }
 
-    pub fn tip_window_number(&self) -> u32 {
-        0
+    pub fn label_window_numbers(&self) -> [u32; 2] {
+        [0; 2]
     }
+
+    pub fn announce(&self, _detail: &str, _rect: [f64; 4], _screen: bool) {}
 
     pub fn place_on(&self, _point: [f64; 2]) {}
 

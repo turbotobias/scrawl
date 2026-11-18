@@ -222,10 +222,15 @@ Preview every pane, dark and light, with the recorder listening and a combinatio
   picker takes over: click a window or drag an area), iPhone to record the phone instead, or just
   carry on.
 - **Record what you chose last** (experiment `rememberSelection`): the press records the window,
-  area or screen you last chose instead of the screen under the pointer, as long as it's still
-  there (a closed window gives way to its app's front window, else the screen). The chips light
-  what it's recording; Window or Area opens the picker to choose another, Screen switches to the
-  screen.
+  area, screen or iPhone you last chose instead of the screen under the pointer, as long as it's
+  still there (a closed window gives way to its app's front window; otherwise it records the
+  screen and keeps your choice). **Press it twice** (`S` twice with `⌥⇧` held, or `⌥⇧S` twice
+  quickly) to choose another in the picker. The chips light what it's recording, and the menu's
+  Record item names it.
+- **See what's recorded** (experiment `showTarget`): a recorded window comes to the front with its
+  app, a banner names the window, area or screen as it starts ("● Recording Safari — GitHub"),
+  and wherever another window covers the chosen one it's darkened and hatched, in the picker and
+  while recording, since the recording shows the chosen window there, not what's on top.
 - **Choose What to Record…** in the menu bar: the picker (Area, Window, Screen, iPhone) opens on
   the display under the pointer. Click a mode, click a window or drag an area; `Esc` cancels.
 - `⌥⇧V`: Paste both `contact-sheet.png` and `summary.md` into the active app or terminal (`⌃⌥⇧V` also works while it's the default)

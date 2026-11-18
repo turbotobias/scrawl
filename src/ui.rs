@@ -599,6 +599,50 @@ impl SelectionMode {
     }
 }
 
+/// The `showTarget` experiment: a recorded window comes to the front, a banner names what's
+/// recorded as it starts, and the overlay hatches what covers the chosen window.
+fn show_target() -> bool {
+    crate::handoff::experiment("showTarget")
+}
+
+/// What the start banner says is recorded: the window's app and title, the area or the screen,
+/// and why it isn't the remembered choice when it isn't.
+fn recording_detail(target: &TargetInfo, standing_in: Option<&str>) -> String {
+    let what = match target.mode {
+        CaptureMode::Window => {
+            let app = target.app.as_deref().unwrap_or("a window");
+            match target
+                .window_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty() && *t != app)
+            {
+                Some(title) if title.chars().count() > 48 => {
+                    format!("{app} — {}…", title.chars().take(47).collect::<String>())
+                }
+                Some(title) => format!("{app} — {title}"),
+                None => app.to_owned(),
+            }
+        }
+        CaptureMode::Region => "this area".to_owned(),
+        CaptureMode::Display | CaptureMode::Device => "this screen".to_owned(),
+    };
+    match standing_in {
+        Some(why) => format!("{what} · {why}"),
+        None => what,
+    }
+}
+
+/// Why a remembered window or area can't be recorded now (`record_shortcut_target`).
+fn gone_note(last: &TargetInfo) -> Option<String> {
+    let app = last.app.as_deref().unwrap_or("its app");
+    match last.mode {
+        CaptureMode::Window => Some(format!("{app}'s window isn't open")),
+        CaptureMode::Region => Some("the area's display isn't connected".to_owned()),
+        CaptureMode::Display | CaptureMode::Device => None,
+    }
+}
+
 /// Where the window, area or screen chosen last is kept (`rememberSelection`), beside the
 /// captures like `last-mode`.
 fn last_selection_path() -> Option<PathBuf> {
@@ -764,8 +808,11 @@ pub struct ScrawlCoordinator {
     inbox: crate::inbox::Inbox,
     /// The mode the last recording used; the picker opens on it.
     last_mode: SelectionMode,
-    /// The window, area or screen chosen last (`rememberSelection`).
+    /// The window, area, screen or iPhone chosen last (`rememberSelection`).
     last_selection: Option<TargetInfo>,
+    /// The next recording stands in for the remembered choice (it's gone, or the iPhone isn't
+    /// cabled): it keeps that choice, and its start says what it records instead and why.
+    standing_in: Option<String>,
     /// The picker opened on Area because the last recording was the iPhone and no phone had been
     /// seen yet: switch to the phone when discovery finds one, unless Kit picked a mode himself.
     open_iphone_when_found: bool,
@@ -854,6 +901,7 @@ impl ScrawlCoordinator {
             inbox: crate::inbox::Inbox::load_default(),
             last_mode: SelectionMode::load_last_used(),
             last_selection: load_last_selection(),
+            standing_in: None,
             open_iphone_when_found: false,
             onboarding: None,
             settings: None,
@@ -1219,6 +1267,7 @@ impl ScrawlCoordinator {
             // An Esc from before this press doesn't cancel it.
             self.telemetry.take_escape();
         }
+        self.shortcut.double_press_chooses = crate::handoff::experiment("rememberSelection");
         let action = self.shortcut.press(activity);
         self.apply_shortcut(action, cx);
     }
@@ -1252,18 +1301,20 @@ impl ScrawlCoordinator {
             }
             Action::RecordScreen => self.record_shortcut_target(cx),
             Action::RecordSelected => self.record_selected_mode(cx),
+            Action::Choose => self.choose_target(cx),
             Action::Finish => self.finish_recording(cx),
         }
     }
 
-    /// The menu's Record Screen item, the review window's Record button and `app --record`.
+    /// The menu's Record item, the review window's Record button and `app --record`: what the
+    /// shortcut records.
     pub fn record_or_finish(&mut self, cx: &mut Context<Self>) {
         if self.is_recording() {
             self.finish_recording(cx);
         } else if self.is_selecting() {
             self.record_selected_mode(cx);
         } else if !self.is_processing() {
-            self.record_screen_now(cx);
+            self.record_shortcut_target(cx);
         }
     }
 
@@ -1290,9 +1341,16 @@ impl ScrawlCoordinator {
             &windows,
             &crate::screens::displays(),
         ) {
-            Reuse::Screen => discover_target(None),
+            Reuse::Screen => {
+                self.standing_in = last.as_ref().and_then(gone_note);
+                discover_target(None)
+            }
             Reuse::Window(window) => window,
             Reuse::Area([x, y, w, h]) => region_target(x, y, w, h, &windows),
+            Reuse::Iphone => {
+                self.record_iphone_if_cabled(cx);
+                return;
+            }
         };
         scrawl_log(format!(
             "record shortcut -> {:?} (last chosen)",
@@ -1302,6 +1360,46 @@ impl ScrawlCoordinator {
         if self.is_recording() {
             self.show_reveal(cx);
         }
+    }
+
+    /// The remembered choice is the iPhone: record it if one is cabled (a quick look with the
+    /// helper, as the picker does), else the screen, so the press records either way.
+    fn record_iphone_if_cabled(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |entity, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async {
+                    crate::helper::devices()
+                        .inspect_err(|error| scrawl_log(format!("iPhone discovery: {error:#}")))
+                        .ok()
+                        .and_then(|devices| devices.into_iter().next())
+                })
+                .await;
+            let _ = entity.update(cx, |coord, cx| {
+                if coord.is_recording() || coord.is_selecting() || coord.is_processing() {
+                    return;
+                }
+                scrawl_log(format!(
+                    "record shortcut -> iPhone (last chosen): {}",
+                    if found.is_some() {
+                        "cabled"
+                    } else {
+                        "none, so the screen"
+                    }
+                ));
+                if found.is_some() {
+                    coord.iphone = found;
+                    coord.start_recording_iphone(cx);
+                    if coord.is_recording() {
+                        coord.show_reveal(cx);
+                    }
+                } else {
+                    coord.standing_in = Some("no iPhone is cabled".to_owned());
+                    coord.record_screen_now(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// What the recording records, as the switch chip lit for it.
@@ -1314,17 +1412,14 @@ impl ScrawlCoordinator {
         }
     }
 
-    /// Remembers the window, area or screen being recorded, for the next press of the shortcut
-    /// (`record_shortcut_target`).
+    /// Remembers the window, area, screen or iPhone being recorded, for the next press of the
+    /// shortcut (`record_shortcut_target`).
     fn remember_selection(&mut self, target: &TargetInfo) {
-        if !matches!(
-            target.mode,
-            CaptureMode::Display | CaptureMode::Window | CaptureMode::Region
-        ) {
-            return;
-        }
+        // The screen and the iPhone are whichever is under the pointer or cabled then.
         let same = self.last_selection.as_ref().is_some_and(|last| {
-            last == target || (last.mode == CaptureMode::Display && target.mode == last.mode)
+            last == target
+                || (last.mode == target.mode
+                    && matches!(target.mode, CaptureMode::Display | CaptureMode::Device))
         });
         if !same {
             self.last_selection = Some(target.clone());
@@ -1437,17 +1532,45 @@ impl ScrawlCoordinator {
             self.start_recording_with_target(discover_target(None), cx);
             return;
         }
-        // Window and Area: the chips stay up while the capsule morphs into the picker.
-        // The recording's overlay becomes the picker's (moved if the picker opens on another
-        // display), so the border never swaps windows (as the picker → recording path does).
+        self.reopen_picker(overlay, current, chips_shown, Some(mode), cx);
+    }
+
+    /// The recording was dropped: the chips stay up while the capsule morphs into the picker on
+    /// `mode` (else the mode last used). The recording's overlay becomes the picker's (moved if
+    /// the picker opens on another display), so the border never swaps windows (as the picker →
+    /// recording path does).
+    fn reopen_picker(
+        &mut self,
+        overlay: Option<LaserOverlay>,
+        current: SelectionMode,
+        chips_shown: bool,
+        mode: Option<SelectionMode>,
+        cx: &mut Context<Self>,
+    ) {
         self.picker_metal_overlay = overlay;
-        self.open_picker(Some(mode), cx);
+        self.open_picker(mode, cx);
         if self.is_selecting() && chips_shown && !self.reduced_motion {
-            // The chips showed what was recorded; the picker shows `mode`.
+            // The chips showed what was recorded; the picker shows its mode.
             self.highlight_prev = Some(current);
             self.highlight_since = motion::now();
             self.island_morph = Morph::Switch;
             self.switch = Some(SwitchMorph { slide: None });
+        }
+    }
+
+    /// A double press of the record shortcut: choose what to record in the picker. When the
+    /// first press already started a recording (`shortcut::DOUBLE_PRESS_MS` ago at most), that
+    /// recording is dropped.
+    pub fn choose_target(&mut self, cx: &mut Context<Self>) {
+        if self.is_recording() {
+            scrawl_log("record shortcut pressed twice -> picker");
+            let current = self.recording_mode();
+            let chips_shown = self.reveal.is_open();
+            if let Some((_, overlay)) = self.discard_recording() {
+                self.reopen_picker(overlay, current, chips_shown, None, cx);
+            }
+        } else if !self.is_selecting() && !self.is_processing() {
+            self.begin_target_selection(cx);
         }
     }
 
@@ -1526,6 +1649,15 @@ impl ScrawlCoordinator {
             _ => None,
         };
         self.telemetry.set_picker_rect(rect);
+        let focus = match self.island_phase {
+            IslandPhase::Selecting {
+                mode: SelectionMode::Window,
+            } if show_target() => self.hovered_window.as_ref().and_then(|t| t.window_id),
+            _ => None,
+        };
+        self.telemetry
+            .focus_window
+            .store(focus.unwrap_or(0), std::sync::atomic::Ordering::Release);
     }
 
     pub fn set_selection_mode(&mut self, mode: SelectionMode, cx: &mut Context<Self>) {
@@ -1962,16 +2094,16 @@ impl ScrawlCoordinator {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(num);
                 }
-                // The tooltip: out of recordings, and clicks under it are the app's.
-                let tip = pill.tip_window_number();
-                if tip > 0 {
+                // The tooltip and the start banner: out of recordings, and clicks under them
+                // are the app's.
+                for label in pill.label_window_numbers().into_iter().filter(|n| *n > 0) {
                     for ids in [
                         &self.telemetry.excluded_window_ids,
                         &self.telemetry.passthrough_window_ids,
                     ] {
                         ids.lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .push(tip);
+                            .push(label);
                     }
                 }
                 self.native_pill = Some(pill);
@@ -2651,6 +2783,7 @@ impl ScrawlCoordinator {
     }
 
     pub fn start_recording_with_target(&mut self, target: TargetInfo, cx: &mut Context<Self>) {
+        let standing_in = self.standing_in.take();
         if self.is_recording() || self.is_processing() {
             return;
         }
@@ -2669,16 +2802,31 @@ impl ScrawlCoordinator {
             "start_recording_with_target invoked: mode={:?} frame={:?}",
             target.mode, target.frame
         ));
-        // Without the picker the start needs its own cue: the overlay flashes an edge glow.
+        // Without the picker the start needs its own cue: the overlay flashes a glow along the
+        // screen's edges (with `showTarget`, a window's or area's too).
         let quick = !self.is_selecting();
+        let show = show_target();
         self.telemetry.start_glow.store(
-            quick && target.mode == CaptureMode::Display,
+            quick && (show || target.mode == CaptureMode::Display),
             std::sync::atomic::Ordering::Release,
         );
+        // `showTarget`: what's seen is what's recorded. A window comes to the front with its app
+        // (a remembered one may be behind others), and the overlay marks what covers it later.
+        let window = (show && target.mode == CaptureMode::Window)
+            .then_some(target.window_id)
+            .flatten();
+        self.telemetry
+            .focus_window
+            .store(window.unwrap_or(0), std::sync::atomic::Ordering::Release);
+        if let Some(id) = window {
+            std::thread::spawn(move || crate::capture::bring_to_front(id));
+        }
         if let IslandPhase::Selecting { mode } = self.island_phase {
             self.remember_mode(mode);
         }
-        self.remember_selection(&target);
+        if standing_in.is_none() {
+            self.remember_selection(&target);
+        }
         self.recording_shortcut_key = false;
         self.iphone_preview = None;
         self.selection_drag = None;
@@ -2748,6 +2896,14 @@ impl ScrawlCoordinator {
                 Arc::clone(&self.telemetry.window_log_request),
             )
         });
+        // Name what's recorded on it, so a press never leaves a doubt which window it is.
+        if show && let Some(ref pill) = self.native_pill {
+            pill.announce(
+                &recording_detail(&target, standing_in.as_deref()),
+                target_rect,
+                target.mode == CaptureMode::Display,
+            );
+        }
         self.active_recording = Some(ActiveRecording {
             started: Instant::now(),
             target,
@@ -2859,8 +3015,12 @@ impl ScrawlCoordinator {
                     scale: 2.0,
                 },
             );
+        self.remember_selection(&target);
         self.telemetry.set_capture_mode(CaptureMode::Device);
         self.telemetry.reset_for_session(initial_frame);
+        self.telemetry
+            .focus_window
+            .store(0, std::sync::atomic::Ordering::Release);
         // Hold interaction telemetry inactive until the helper's `recording` event arrives.
         self.telemetry
             .active
@@ -5737,6 +5897,47 @@ pub fn run_app(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_start_banner_names_the_window_area_or_screen() {
+        let target = |mode, app: Option<&str>, title: Option<&str>| TargetInfo {
+            mode,
+            app: app.map(str::to_owned),
+            bundle_id: None,
+            window_title: title.map(str::to_owned),
+            window_id: Some(7),
+            display_id: 1,
+            frame: TargetFrame {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+                scale: 2.0,
+            },
+        };
+        let detail = |t: &TargetInfo| recording_detail(t, None);
+        assert_eq!(
+            detail(&target(CaptureMode::Window, Some("Safari"), Some("GitHub"))),
+            "Safari — GitHub"
+        );
+        assert_eq!(
+            detail(&target(CaptureMode::Window, Some("Finder"), Some("Finder"))),
+            "Finder"
+        );
+        let long = "a".repeat(80);
+        assert!(detail(&target(CaptureMode::Window, Some("Code"), Some(&long))).ends_with("a…"));
+        assert_eq!(
+            detail(&target(CaptureMode::Region, Some("Safari"), None)),
+            "this area"
+        );
+        let screen = target(CaptureMode::Display, Some("Safari"), Some("GitHub"));
+        assert_eq!(detail(&screen), "this screen");
+        let gone = target(CaptureMode::Window, Some("Safari"), None);
+        assert_eq!(
+            recording_detail(&screen, gone_note(&gone).as_deref()),
+            "this screen · Safari's window isn't open"
+        );
+    }
 
     #[test]
     fn island_geometry_is_concentric() {

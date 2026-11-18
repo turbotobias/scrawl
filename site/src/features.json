@@ -45,11 +45,23 @@
       "id": "remember-selection",
       "group": "start",
       "name": "Record what you chose last",
-      "says": "The shortcut records the window, area or screen you chose last, while it's still there (if the window closed, its app's front window), and the chips light it and offer the others.",
+      "says": "The shortcut records the window, area, screen or iPhone you chose last, while it's still there (if the window closed, its app's front window); press it twice to choose another in the picker. The chips light what's recorded and the menu names it.",
       "status": "experiment:rememberSelection",
       "platforms": ["mac", "windows", "linux"],
       "added": "2026-11-11",
-      "note": "Tried on a Mac only. An iPhone capture leaves the choice as it was.",
+      "note": "Tried on a Mac only. When the choice is gone the screen is recorded and the choice kept.",
+      "shortcuts": [{"keys": "⌥⇧S twice", "does": "Choose what to record (S twice with ⌥⇧ held, or ⌥⇧S twice quickly)"}],
+      "docs": ["README.md#capture-controls", "docs/capture.md", "docs/keyframes-and-text.md"]
+    },
+    {
+      "id": "show-target",
+      "group": "start",
+      "name": "Plain what's recorded",
+      "says": "A recorded window comes to the front with its app, a banner names the window, area or screen as it starts, and the parts of the chosen window other windows cover are hatched, in the picker and while recording.",
+      "status": "experiment:showTarget",
+      "platforms": ["mac"],
+      "added": "2026-11-18",
+      "note": "The banner needs the Metal capsule; bringing the window forward needs Accessibility.",
       "docs": ["README.md#capture-controls", "docs/capture.md", "docs/keyframes-and-text.md"]
     },
     {

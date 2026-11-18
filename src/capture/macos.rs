@@ -47,6 +47,88 @@ pub(super) fn raw_windows_now() -> Vec<crate::windows::RawWindow> {
     objc2::rc::autoreleasepool(|_| crate::windows::raw_windows())
 }
 
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn AXUIElementCreateApplication(pid: i32) -> *const c_void;
+    fn AXUIElementCopyAttributeValue(
+        element: *const c_void,
+        attribute: core_foundation::string::CFStringRef,
+        out: *mut core_foundation::base::CFTypeRef,
+    ) -> i32;
+    fn AXUIElementSetAttributeValue(
+        element: *const c_void,
+        attribute: core_foundation::string::CFStringRef,
+        value: core_foundation::base::CFTypeRef,
+    ) -> i32;
+    fn AXUIElementPerformAction(
+        element: *const c_void,
+        action: core_foundation::string::CFStringRef,
+    ) -> i32;
+    fn AXUIElementSetMessagingTimeout(element: *const c_void, seconds: f32) -> i32;
+    /// The window server's id for an `AXWindow` (private, but long stable; window managers use it).
+    fn _AXUIElementGetWindow(element: *const c_void, id: *mut u32) -> i32;
+}
+
+/// Brings window `id` to the front with its app, so what's seen is what's recorded (a window
+/// recording records the window, whatever covers it). Accessibility messages give up after
+/// 0.25 s each; call it off the main thread.
+pub fn bring_to_front(id: u32) {
+    use core_foundation::array::{CFArray, CFArrayRef};
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::string::CFString;
+    let Some(pid) = raw_windows_now().iter().find(|w| w.id == id).map(|w| w.pid) else {
+        return;
+    };
+    let key = CFString::from_static_string;
+    let yes = CFBoolean::true_value();
+    unsafe {
+        let app = AXUIElementCreateApplication(pid);
+        if app.is_null() {
+            return;
+        }
+        let app = CFType::wrap_under_create_rule(app);
+        let app_ref = app.as_CFTypeRef();
+        AXUIElementSetMessagingTimeout(app_ref, 0.25);
+        let mut windows: *const c_void = ptr::null();
+        let raised = AXUIElementCopyAttributeValue(
+            app_ref,
+            key("AXWindows").as_concrete_TypeRef(),
+            &raw mut windows,
+        ) == 0
+            && !windows.is_null()
+            && {
+                let windows = CFArray::<CFType>::wrap_under_create_rule(windows as CFArrayRef);
+                windows.iter().any(|window| {
+                    let mut wid = 0_u32;
+                    let found = _AXUIElementGetWindow(window.as_CFTypeRef(), &raw mut wid) == 0
+                        && wid == id;
+                    if found {
+                        AXUIElementPerformAction(
+                            window.as_CFTypeRef(),
+                            key("AXRaise").as_concrete_TypeRef(),
+                        );
+                        AXUIElementSetAttributeValue(
+                            window.as_CFTypeRef(),
+                            key("AXMain").as_concrete_TypeRef(),
+                            yes.as_CFTypeRef(),
+                        );
+                    }
+                    found
+                })
+            };
+        let front = AXUIElementSetAttributeValue(
+            app_ref,
+            key("AXFrontmost").as_concrete_TypeRef(),
+            yes.as_CFTypeRef(),
+        );
+        crate::capture::scrawl_log(format!(
+            "bring_to_front({id}): pid {pid}, window raised {raised}, app frontmost {}",
+            front == 0
+        ));
+    }
+}
+
 /// Whether `pid` runs this Scrawl's `scrawl-helper` (the iPhone mirror, Settings, onboarding, the
 /// permission panel), going by its executable, so a helper started by another helper counts too.
 pub(super) fn is_helper_process(pid: i32) -> bool {

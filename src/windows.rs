@@ -270,6 +270,31 @@ pub fn owned_window_at(
         .is_some_and(|w| ours(w.pid))
 }
 
+/// The parts of window `id` that other windows in front of it cover, from the window server's
+/// front-to-back list: what shows there on screen isn't what a recording of `id` records. Only
+/// app windows count (layers below the Dock's 20: normal, floating and modal ones), not `own`
+/// process's or invisible ones. Each is clipped to `id`'s bounds; at most `max` of them.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn covers_of(raw: &[RawWindow], id: u32, own: i32, max: usize) -> Vec<[f64; 4]> {
+    let Some(depth) = raw.iter().position(|w| w.id == id) else {
+        return Vec::new();
+    };
+    let [tx, ty, tw, th] = raw[depth].bounds;
+    raw[..depth]
+        .iter()
+        .filter(|w| (0..20).contains(&w.layer) && w.alpha > 0.01 && w.pid != own)
+        .filter_map(|w| {
+            let [x, y, width, height] = w.bounds;
+            let x0 = x.max(tx);
+            let y0 = y.max(ty);
+            let x1 = (x + width).min(tx + tw);
+            let y1 = (y + height).min(ty + th);
+            (x1 - x0 >= 1.0 && y1 - y0 >= 1.0).then_some([x0, y0, x1 - x0, y1 - y0])
+        })
+        .take(max)
+        .collect()
+}
+
 /// The topmost normal window of `pid` that overlaps `rect` (`[x, y, w, h]`, global points), from
 /// the window server's front-to-back list. This is the window the user is looking at when that
 /// app is in front; ScreenCaptureKit's window array has no such order.
@@ -652,6 +677,39 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_in_front_cover_parts_of_the_one_behind() {
+        let w = |id: u32, pid: i32, bounds: [f64; 4], layer: i32| RawWindow {
+            id,
+            pid,
+            owner: String::new(),
+            title: String::new(),
+            bounds,
+            layer,
+            alpha: 1.0,
+        };
+        let raw = [
+            // Scrawl's own capsule, the Dock and a menu are never covers.
+            w(1, 99, [0.0, 0.0, 2000.0, 2000.0], 25),
+            w(2, 99, [0.0, 0.0, 2000.0, 2000.0], 0),
+            w(3, 10, [0.0, 800.0, 1440.0, 100.0], 20),
+            // A floating panel and a window half over the target, and one beside it.
+            w(4, 11, [150.0, 150.0, 50.0, 50.0], 3),
+            w(5, 12, [500.0, 0.0, 800.0, 900.0], 0),
+            w(6, 13, [1300.0, 0.0, 100.0, 100.0], 0),
+            // The target, and a window behind it.
+            w(7, 14, [100.0, 100.0, 600.0, 400.0], 0),
+            w(8, 15, [0.0, 0.0, 1440.0, 900.0], 0),
+        ];
+        assert_eq!(
+            covers_of(&raw, 7, 99, 8),
+            [[150.0, 150.0, 50.0, 50.0], [500.0, 100.0, 200.0, 400.0]]
+        );
+        assert_eq!(covers_of(&raw, 7, 99, 1).len(), 1);
+        assert!(covers_of(&raw, 42, 99, 8).is_empty(), "not on screen");
+        assert!(covers_of(&raw, 4, 99, 8).is_empty(), "nothing in front");
+    }
 
     fn frame() -> TargetFrame {
         TargetFrame {

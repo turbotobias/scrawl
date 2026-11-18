@@ -56,6 +56,10 @@ Off by default (see Experiments in `AGENTS.md`). Lines, arrows and boxes drawn w
 
 Off by default (see Experiments in `AGENTS.md`). The record shortcut records the window, area or screen chosen last while it's still there (`docs/capture.md`), so a Window or Area capture's bundle comes from a press as it would from the picker: same `target`, no auto-crop of a full screen.
 
+## Experiment `showTarget` (`capture::bring_to_front`, `windows::covers_of`)
+
+Off by default (see Experiments in `AGENTS.md`). A recorded window comes to the front as it starts, a banner names what's recorded, and covered parts of the chosen window are hatched (`docs/capture.md`). The bundle is unchanged: none of it is recorded.
+
 ## Experiment `clipboardImage` (`src/handoff.rs`, `src/win/clipboard.rs`)
 
 Off by default; Windows only. A finished capture (and `scrawl send` to the clipboard) normally copies `summary.md`'s text alone, so pressing Ctrl+V yourself drops the contact sheet; only the Paste chip and the paste shortcut paste the image first. With it on, `copy_bundle_to_clipboard` puts `contact-sheet.png` (`PNG` and `CF_DIBV5`) and the text on the clipboard together, so one Ctrl+V attaches the image and inserts the text in a browser or Electron composer (checked in the Claude desktop app) and pastes just the text in a terminal. If the contact sheet can't be read, the text is copied alone.

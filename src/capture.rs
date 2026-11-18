@@ -602,12 +602,15 @@ pub enum Reuse {
     Window(TargetInfo),
     /// An area, global points.
     Area([f64; 4]),
+    /// The cabled iPhone, if one is (the caller looks).
+    Iphone,
 }
 
 /// The window, area or screen last chosen (`last`), if it's still there: the same window, else
 /// the front window of its app (reopened, or a new one), and an area while a display holds its
 /// centre.
-/// Anything else records the screen, so a press always records straight away.
+/// The iPhone is left to the caller, which knows whether one is cabled. Anything else records the
+/// screen, so a press always records straight away.
 pub fn reuse_selection(
     last: Option<&TargetInfo>,
     windows: &[TargetInfo],
@@ -644,7 +647,8 @@ pub fn reuse_selection(
                 Reuse::Screen
             }
         }
-        CaptureMode::Display | CaptureMode::Device => Reuse::Screen,
+        CaptureMode::Device => Reuse::Iphone,
+        CaptureMode::Display => Reuse::Screen,
     }
 }
 
@@ -801,6 +805,9 @@ pub struct SharedCaptureTelemetry {
     pub started_at: Mutex<Instant>,
     pub picker_started_at: Mutex<Instant>,
     pub picker_rect: Mutex<Option<([f32; 4], u8)>>,
+    /// The window the picker highlights or the recording records (0: none), so the overlay can
+    /// mark the parts other windows cover (`windows::covers_of`).
+    pub focus_window: std::sync::atomic::AtomicU32,
     pub target_frame: Mutex<TargetFrame>,
     pub pointer_screen: Mutex<[f32; 2]>,
     pub events: Mutex<Vec<InteractionEvent>>,
@@ -869,6 +876,7 @@ impl SharedCaptureTelemetry {
             started_at: Mutex::new(Instant::now()),
             picker_started_at: Mutex::new(Instant::now()),
             picker_rect: Mutex::new(None),
+            focus_window: std::sync::atomic::AtomicU32::new(0),
             target_frame: Mutex::new(TargetFrame {
                 x: 0.0,
                 y: 0.0,
@@ -2452,6 +2460,14 @@ mod tests {
         assert_eq!(
             reuse_selection(Some(&display), &open, &screens),
             Reuse::Screen
+        );
+        let phone = TargetInfo {
+            mode: CaptureMode::Device,
+            ..area(0.0)
+        };
+        assert_eq!(
+            reuse_selection(Some(&phone), &open, &screens),
+            Reuse::Iphone
         );
     }
 }
