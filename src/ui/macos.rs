@@ -475,7 +475,7 @@ const INBOX_MENU_TAG: isize = 0x5c4a;
 const EXPORT_VIDEO_MENU_TAG: isize = 0x5c4e;
 /// Tag on **Record Screen**, whose title carries the record shortcut.
 const RECORD_MENU_TAG: isize = 0x5c4d;
-/// Tag on **Choose What to Record…**, whose title carries the double press.
+/// Tag on **Choose What to Record…**, whose title carries the choose shortcut.
 const CHOOSE_MENU_TAG: isize = 0x5c4f;
 
 /// "Record Screen" with the record shortcut as it is now (Settings can change it).
@@ -501,13 +501,21 @@ fn record_menu_title() -> String {
     )
 }
 
-/// The picker, with the shortcut's double press that opens it too.
+/// The picker, with the choose shortcut that opens it too (`rememberSelection`).
 fn choose_menu_title() -> String {
-    let record = crate::settings::Shortcuts::load().record;
-    if record.is_unset() || !crate::handoff::experiment("rememberSelection") {
-        "Choose What to Record…".to_owned()
-    } else {
-        format!("Choose What to Record…  {} twice", record.label)
+    let shortcuts = crate::settings::Shortcuts::load();
+    let key = crate::handoff::experiment("rememberSelection")
+        .then(|| {
+            crate::capture::choose_shortcut(
+                &shortcuts.record,
+                &shortcuts.paste,
+                u32::from(crate::capture::layout_c_keycode()),
+            )
+        })
+        .flatten();
+    match key {
+        Some((_, _, label)) => format!("Choose What to Record…  {label}"),
+        None => "Choose What to Record…".to_owned(),
     }
 }
 

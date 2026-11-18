@@ -178,6 +178,8 @@ pub const KEY_S: u16 = 1;
 const KEY_ESCAPE: u16 = 53;
 const KEY_Z: u16 = 6;
 pub const KEY_V: u16 = 9;
+/// The C key on the ANSI layout (`kVK_ANSI_C`), the choose shortcut's.
+const KEY_C: u16 = 8;
 
 // Carbon HIToolbox global hotkey constants (requires zero TCC permissions).
 const K_EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
@@ -189,6 +191,7 @@ const HOTKEY_ID_TOGGLE: u32 = 1;
 const HOTKEY_ID_ALT1: u32 = 3;
 const HOTKEY_ID_PASTE_BASE: u32 = 100;
 const HOTKEY_ID_TOOL_BASE: u32 = 200;
+const HOTKEY_ID_CHOOSE: u32 = 300;
 /// The tool shortcuts' keys (ANSI 1–4) and what each draws with (`None`: the pen).
 const TOOL_KEYS: [(u32, Option<Tool>); 4] = [
     (18, None),
@@ -443,6 +446,11 @@ pub fn layout_v_keycode() -> u16 {
     key_code_for_char('v').unwrap_or(KEY_V)
 }
 
+/// C on the active layout, for the choose shortcut (`super::choose_shortcut`).
+pub fn layout_c_keycode() -> u16 {
+    key_code_for_char('c').unwrap_or(KEY_C)
+}
+
 /// The registered Carbon hotkeys, so a change can replace all of them.
 struct CarbonHotKeyState {
     refs: Vec<usize>,
@@ -483,7 +491,9 @@ unsafe extern "C" fn carbon_hotkey_handler(
     ));
     if status == 0 && sig == HOTKEY_SIG {
         let telemetry = unsafe { &*user_data.cast::<SharedCaptureTelemetry>() };
-        if let Some(&(_, tool)) = id
+        if id == HOTKEY_ID_CHOOSE {
+            telemetry.emit_choose_shortcut();
+        } else if let Some(&(_, tool)) = id
             .checked_sub(HOTKEY_ID_TOOL_BASE)
             .and_then(|i| TOOL_KEYS.get(i as usize))
         {
@@ -659,6 +669,32 @@ fn register_shortcuts(
             } else if i == 0 && failed.is_none() {
                 failed = Some(kind);
             }
+        }
+    }
+    // The choose shortcut, best effort: it never blocks a change to the other two.
+    if crate::handoff::experiment("rememberSelection")
+        && let Some((code, mods, label)) =
+            super::choose_shortcut(record, paste, u32::from(layout_c_keycode()))
+    {
+        let mut r: *mut c_void = ptr::null_mut();
+        let rc = unsafe {
+            RegisterEventHotKey(
+                code,
+                mods,
+                EventHotKeyID {
+                    signature: HOTKEY_SIG,
+                    id: HOTKEY_ID_CHOOSE,
+                },
+                target,
+                0,
+                &raw mut r,
+            )
+        };
+        scrawl_log(format!(
+            "RegisterEventHotKey(Choose {label}, code={code}, mods={mods}) -> rc={rc} ref={r:p}"
+        ));
+        if rc == 0 && !r.is_null() {
+            state.refs.push(r as usize);
         }
     }
     failed.map_or(Ok(()), Err)

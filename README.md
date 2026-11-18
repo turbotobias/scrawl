@@ -224,8 +224,9 @@ Preview every pane, dark and light, with the recorder listening and a combinatio
 - **Record what you chose last** (experiment `rememberSelection`): the press records the window,
   area, screen or iPhone you last chose instead of the screen under the pointer, as long as it's
   still there (a closed window gives way to its app's front window; otherwise it records the
-  screen and keeps your choice). **Press it twice** (`S` twice with `⌥⇧` held, or `⌥⇧S` twice
-  quickly) to choose another in the picker. The chips light what it's recording, and the menu's
+  screen and keeps your choice). **`⌥⇧C`** chooses another in the picker (press it again there
+  for the next of Area, Window, Screen and iPhone; while recording it drops the recording to
+  choose again). The chips light what it's recording, and the menu's
   Record item names it.
 - **See what's recorded** (experiment `showTarget`): a recorded window comes to the front with its
   app, a banner names the window, area or screen as it starts ("● Recording Safari — GitHub"),

@@ -1267,7 +1267,6 @@ impl ScrawlCoordinator {
             // An Esc from before this press doesn't cancel it.
             self.telemetry.take_escape();
         }
-        self.shortcut.double_press_chooses = crate::handoff::experiment("rememberSelection");
         let action = self.shortcut.press(activity);
         self.apply_shortcut(action, cx);
     }
@@ -1301,7 +1300,6 @@ impl ScrawlCoordinator {
             }
             Action::RecordScreen => self.record_shortcut_target(cx),
             Action::RecordSelected => self.record_selected_mode(cx),
-            Action::Choose => self.choose_target(cx),
             Action::Finish => self.finish_recording(cx),
         }
     }
@@ -1558,12 +1556,22 @@ impl ScrawlCoordinator {
         }
     }
 
-    /// A double press of the record shortcut: choose what to record in the picker. When the
-    /// first press already started a recording (`shortcut::DOUBLE_PRESS_MS` ago at most), that
-    /// recording is dropped.
-    pub fn choose_target(&mut self, cx: &mut Context<Self>) {
+    /// The choose shortcut (⌥⇧C, `capture::choose_shortcut`): the picker, on the mode last used;
+    /// pressed in the picker, its next mode. A recording is dropped to choose again, as the
+    /// capsule's chips do.
+    pub fn press_choose(&mut self, cx: &mut Context<Self>) {
+        if let Some(mode) = self.selection_mode() {
+            let has_iphone = self.iphone.is_some();
+            self.choose_selection_mode(mode.cycled(true, has_iphone), cx);
+        } else {
+            self.choose_target(cx);
+        }
+    }
+
+    /// Choose what to record in the picker, dropping a recording that's running.
+    fn choose_target(&mut self, cx: &mut Context<Self>) {
         if self.is_recording() {
-            scrawl_log("record shortcut pressed twice -> picker");
+            scrawl_log("choose shortcut -> picker");
             let current = self.recording_mode();
             let chips_shown = self.reveal.is_open();
             if let Some((_, overlay)) = self.discard_recording() {
@@ -5822,6 +5830,7 @@ pub fn run_app(
                     while let Ok(ev) = ui_receiver.try_recv() {
                         loop_coord.update(cx, |coord, cx| match ev {
                             LiveOverlayEvent::CaptureShortcut => coord.press_shortcut(cx),
+                            LiveOverlayEvent::ChooseShortcut => coord.press_choose(cx),
                             LiveOverlayEvent::PasteLatestShortcut => {
                                 if !coord.is_recording() && !coord.is_selecting() {
                                     coord.paste_latest(cx);
