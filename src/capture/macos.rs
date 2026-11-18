@@ -23,6 +23,7 @@ use super::{
     poll_clicks, scrawl_log, track_shift_ink,
 };
 use crate::model::{CaptureMode, InteractionEvent, RgbaFrame, TargetInfo, Tool};
+use crate::shortcut::HoldKey;
 
 /// Recordings may hold up to twice a frame's size in points (Retina pixels).
 pub const MAX_CAPTURE_SCALE: f64 = 2.0;
@@ -178,12 +179,11 @@ pub const KEY_S: u16 = 1;
 const KEY_ESCAPE: u16 = 53;
 const KEY_Z: u16 = 6;
 pub const KEY_V: u16 = 9;
-/// The C key on the ANSI layout (`kVK_ANSI_C`), the choose shortcut's.
-const KEY_C: u16 = 8;
 
 // Carbon HIToolbox global hotkey constants (requires zero TCC permissions).
 const K_EVENT_CLASS_KEYBOARD: u32 = u32::from_be_bytes(*b"keyb");
 const K_EVENT_HOT_KEY_PRESSED: u32 = 5;
+const K_EVENT_HOT_KEY_RELEASED: u32 = 6;
 const K_EVENT_PARAM_DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
 const TYPE_EVENT_HOT_KEY_ID: u32 = u32::from_be_bytes(*b"hkid");
 const HOTKEY_SIG: u32 = u32::from_be_bytes(*b"SCRW");
@@ -191,7 +191,7 @@ const HOTKEY_ID_TOGGLE: u32 = 1;
 const HOTKEY_ID_ALT1: u32 = 3;
 const HOTKEY_ID_PASTE_BASE: u32 = 100;
 const HOTKEY_ID_TOOL_BASE: u32 = 200;
-const HOTKEY_ID_CHOOSE: u32 = 300;
+const HOTKEY_ID_HOLD_BASE: u32 = 400;
 /// The tool shortcuts' keys (ANSI 1–4) and what each draws with (`None`: the pen).
 const TOOL_KEYS: [(u32, Option<Tool>); 4] = [
     (18, None),
@@ -201,6 +201,16 @@ const TOOL_KEYS: [(u32, Option<Tool>); 4] = [
 ];
 /// The tool shortcuts while a recording runs (`set_tool_hotkeys`).
 static TOOL_HOTKEYS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+/// The keys taken while the record shortcut is held (`set_hold_hotkeys`): Tab, ⇧Tab, →, ←, Esc
+/// (`kVK_Tab`, `kVK_RightArrow`, `kVK_LeftArrow`, `kVK_Escape`), with the shortcut's modifiers.
+const HOLD_KEYS: [(u32, bool, HoldKey); 5] = [
+    (48, false, HoldKey::Next),
+    (48, true, HoldKey::Previous),
+    (124, false, HoldKey::Next),
+    (123, false, HoldKey::Previous),
+    (53, false, HoldKey::Cancel),
+];
+static HOLD_HOTKEYS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
 #[repr(C, packed(2))]
 #[derive(Clone, Copy)]
@@ -237,6 +247,7 @@ unsafe extern "C" {
         out_ref: *mut *mut c_void,
     ) -> i32;
     fn UnregisterEventHotKey(hot_key: *mut c_void) -> i32;
+    fn GetEventKind(event: *mut c_void) -> u32;
     fn GetEventParameter(
         event: *mut c_void,
         name: u32,
@@ -310,6 +321,7 @@ unsafe extern "C" {
     fn CGEventSetFlags(event: EventRef, flags: u64);
     fn CGEventPost(tap: u32, event: EventRef);
     fn CGEventSourceFlagsState(state_id: u32) -> u64;
+    fn CGEventSourceKeyState(state_id: u32, key: u16) -> bool;
     fn CGEventGetFlags(event: EventRef) -> u64;
     fn CGEventGetType(event: EventRef) -> u32;
     fn CGEventGetLocation(event: EventRef) -> CGPoint;
@@ -446,11 +458,6 @@ pub fn layout_v_keycode() -> u16 {
     key_code_for_char('v').unwrap_or(KEY_V)
 }
 
-/// C on the active layout, for the choose shortcut (`super::choose_shortcut`).
-pub fn layout_c_keycode() -> u16 {
-    key_code_for_char('c').unwrap_or(KEY_C)
-}
-
 /// The registered Carbon hotkeys, so a change can replace all of them.
 struct CarbonHotKeyState {
     refs: Vec<usize>,
@@ -491,8 +498,16 @@ unsafe extern "C" fn carbon_hotkey_handler(
     ));
     if status == 0 && sig == HOTKEY_SIG {
         let telemetry = unsafe { &*user_data.cast::<SharedCaptureTelemetry>() };
-        if id == HOTKEY_ID_CHOOSE {
-            telemetry.emit_choose_shortcut();
+        let record = id < HOTKEY_ID_PASTE_BASE;
+        if unsafe { GetEventKind(event) } == K_EVENT_HOT_KEY_RELEASED {
+            if record {
+                telemetry.record_key_released();
+            }
+        } else if let Some(&(_, _, key)) = id
+            .checked_sub(HOTKEY_ID_HOLD_BASE)
+            .and_then(|i| HOLD_KEYS.get(i as usize))
+        {
+            telemetry.emit_hold_key(key);
         } else if let Some(&(_, tool)) = id
             .checked_sub(HOTKEY_ID_TOOL_BASE)
             .and_then(|i| TOOL_KEYS.get(i as usize))
@@ -501,6 +516,7 @@ unsafe extern "C" fn carbon_hotkey_handler(
         } else if id >= HOTKEY_ID_PASTE_BASE {
             telemetry.emit_paste_shortcut();
         } else {
+            telemetry.record_key_pressed();
             telemetry.emit_capture_shortcut();
         }
     }
@@ -513,10 +529,13 @@ pub fn install_global_hotkeys(telemetry: &Arc<SharedCaptureTelemetry>) {
     let _ = init_keyboard_layout_map();
     let s_code = u32::from(layout_s_keycode());
     let state_mutex = CARBON_HOTKEYS.get_or_init(|| {
-        let spec = EventTypeSpec {
-            event_class: K_EVENT_CLASS_KEYBOARD,
-            event_kind: K_EVENT_HOT_KEY_PRESSED,
-        };
+        // Released too: holding the record shortcut lasts until its key comes up.
+        let spec = [K_EVENT_HOT_KEY_PRESSED, K_EVENT_HOT_KEY_RELEASED].map(|event_kind| {
+            EventTypeSpec {
+                event_class: K_EVENT_CLASS_KEYBOARD,
+                event_kind,
+            }
+        });
         let user_data = Arc::into_raw(Arc::clone(telemetry))
             .cast_mut()
             .cast::<c_void>();
@@ -531,8 +550,8 @@ pub fn install_global_hotkeys(telemetry: &Arc<SharedCaptureTelemetry>) {
                 let rc = InstallEventHandler(
                     dispatcher,
                     carbon_hotkey_handler,
-                    1,
-                    &raw const spec,
+                    spec.len(),
+                    spec.as_ptr(),
                     user_data,
                     &raw mut handler_ref,
                 );
@@ -545,8 +564,8 @@ pub fn install_global_hotkeys(telemetry: &Arc<SharedCaptureTelemetry>) {
                 let rc = InstallEventHandler(
                     app_target,
                     carbon_hotkey_handler,
-                    1,
-                    &raw const spec,
+                    spec.len(),
+                    spec.as_ptr(),
                     user_data,
                     &raw mut app_handler_ref,
                 );
@@ -563,6 +582,76 @@ pub fn install_global_hotkeys(telemetry: &Arc<SharedCaptureTelemetry>) {
             "install_global_hotkeys: {kind:?} shortcut could not be registered"
         ));
     }
+}
+
+/// Registers Tab, ⇧Tab, the arrows and Esc with the record shortcut's modifiers while `on`
+/// (`HOLD_KEYS`), and removes them otherwise. Only from the moment the shortcut goes down until
+/// it's let go (`rememberSelection`): macOS hands a registered hotkey to Scrawl alone, so for that
+/// moment the app in front never sees them, and at no other time are they taken.
+pub fn set_hold_hotkeys(telemetry: &SharedCaptureTelemetry, on: bool) {
+    let mut refs = HOLD_HOTKEYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for r in refs.drain(..) {
+        unsafe { UnregisterEventHotKey(r as *mut c_void) };
+    }
+    if !on {
+        return;
+    }
+    let (record, _) = telemetry.shortcuts();
+    let mods = record.carbon_modifiers;
+    let target = hotkey_target();
+    for (i, &(code, shift, _)) in HOLD_KEYS.iter().enumerate() {
+        // ⇧ is already held for ⌥⇧S: ← steps back there.
+        if shift && mods & super::CARBON_SHIFT_KEY != 0 {
+            continue;
+        }
+        let mods = if shift {
+            mods | super::CARBON_SHIFT_KEY
+        } else {
+            mods
+        };
+        let mut r: *mut c_void = ptr::null_mut();
+        let rc = unsafe {
+            RegisterEventHotKey(
+                code,
+                mods,
+                EventHotKeyID {
+                    signature: HOTKEY_SIG,
+                    id: HOTKEY_ID_HOLD_BASE + i as u32,
+                },
+                target,
+                0,
+                &raw mut r,
+            )
+        };
+        if rc == 0 && !r.is_null() {
+            refs.push(r as usize);
+        } else {
+            scrawl_log(format!("Hold key {code} could not be registered: rc={rc}"));
+        }
+    }
+}
+
+/// Whether the record shortcut's own key is still down, for a shortcut with no modifiers to
+/// hold (F16, say): until Carbon sees it come up, and while the key-state poll agrees. The poll
+/// counts only once it has seen the key down in this press, so where it can't see keys (no Input
+/// Monitoring) Carbon alone decides.
+pub fn record_key_held(telemetry: &SharedCaptureTelemetry) -> bool {
+    if telemetry.record_key_up.load(Ordering::Acquire) {
+        return false;
+    }
+    let Ok(code) = u16::try_from(telemetry.shortcuts().0.key_code) else {
+        return false;
+    };
+    let down = unsafe { CGEventSourceKeyState(0, code) || CGEventSourceKeyState(1, code) };
+    if down {
+        telemetry
+            .record_key_seen_down
+            .store(true, Ordering::Release);
+        return true;
+    }
+    !telemetry.record_key_seen_down.load(Ordering::Acquire)
 }
 
 /// Registers the tool shortcuts (the record shortcut's modifiers with 1–4, `tool_modifiers`) while
@@ -669,32 +758,6 @@ fn register_shortcuts(
             } else if i == 0 && failed.is_none() {
                 failed = Some(kind);
             }
-        }
-    }
-    // The choose shortcut, best effort: it never blocks a change to the other two.
-    if crate::handoff::experiment("rememberSelection")
-        && let Some((code, mods, label)) =
-            super::choose_shortcut(record, paste, u32::from(layout_c_keycode()))
-    {
-        let mut r: *mut c_void = ptr::null_mut();
-        let rc = unsafe {
-            RegisterEventHotKey(
-                code,
-                mods,
-                EventHotKeyID {
-                    signature: HOTKEY_SIG,
-                    id: HOTKEY_ID_CHOOSE,
-                },
-                target,
-                0,
-                &raw mut r,
-            )
-        };
-        scrawl_log(format!(
-            "RegisterEventHotKey(Choose {label}, code={code}, mods={mods}) -> rc={rc} ref={r:p}"
-        ));
-        if rc == 0 && !r.is_null() {
-            state.refs.push(r as usize);
         }
     }
     failed.map_or(Ok(()), Err)

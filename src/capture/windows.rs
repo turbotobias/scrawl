@@ -1096,6 +1096,14 @@ fn run_key_poller(telemetry: Arc<SharedCaptureTelemetry>) {
 /// The tool shortcuts are macOS's for now (the tools' buttons are the native capsule's).
 pub fn set_tool_hotkeys(_telemetry: &SharedCaptureTelemetry, _on: bool) {}
 
+/// The keys taken while the record shortcut is held are macOS only.
+pub fn set_hold_hotkeys(_telemetry: &SharedCaptureTelemetry, _on: bool) {}
+
+/// Nothing tracks a modifier-less shortcut's key-up here: it records as it goes down.
+pub fn record_key_held(_telemetry: &SharedCaptureTelemetry) -> bool {
+    false
+}
+
 // MARK: Recording
 
 pub(super) fn run_sampler(sampler: Sampler) -> Option<PathBuf> {

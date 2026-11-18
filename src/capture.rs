@@ -123,8 +123,8 @@ pub struct ScreenRecording {
 pub enum LiveOverlayEvent {
     /// ⌥⇧S (or the configured shortcut) went down; `shortcut::Shortcut` decides what it means.
     CaptureShortcut,
-    /// The choose shortcut (`choose_shortcut`, ⌥⇧C) went down.
-    ChooseShortcut,
+    /// Tab, an arrow or Esc while the record shortcut is held (`set_hold_hotkeys`).
+    HoldKey(crate::shortcut::HoldKey),
     PasteLatestShortcut,
     UndoStroke,
     /// A shape tool to draw with (`None`: the pen), from a tool shortcut while recording.
@@ -450,26 +450,6 @@ pub(crate) fn tool_modifiers(record: u32) -> u32 {
     } else {
         mods
     }
-}
-
-/// The choose shortcut (`rememberSelection`): the tool shortcuts' modifiers (⌥⇧ by default) with
-/// C, as `(key code, Carbon modifiers, label)`, given C's key code on the active layout. It opens
-/// the picker, and in the picker moves to the next mode. `None` when the record or paste shortcut
-/// already takes that combo.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn choose_shortcut(
-    record: &ShortcutConfig,
-    paste: &ShortcutConfig,
-    c_code: u32,
-) -> Option<(u32, u32, String)> {
-    let mods = tool_modifiers(record.carbon_modifiers);
-    let combo = (c_code, mods);
-    if hotkey_combos(ShortcutKind::Record, record).contains(&combo)
-        || hotkey_combos(ShortcutKind::Paste, paste).contains(&combo)
-    {
-        return None;
-    }
-    Some((c_code, mods, format!("{}C", modifiers_label(mods))))
 }
 
 /// Carbon modifiers as macOS writes them (`⌃⌥⇧⌘`).
@@ -871,6 +851,10 @@ pub struct SharedCaptureTelemetry {
     /// poller records clicks from polled button state.
     mouse_live: AtomicBool,
     last_shortcut_ms: AtomicU64,
+    /// Carbon saw the record shortcut's key come up since it last went down (true at rest).
+    pub(crate) record_key_up: AtomicBool,
+    /// The key-state poll saw that key down during this press (`record_key_held`).
+    pub(crate) record_key_seen_down: AtomicBool,
     drag_start: Mutex<Option<(u64, f32, f32, Option<String>, TargetFrame)>>,
     /// The `agentContext` experiment was on when this capture started: clicks and strokes are
     /// looked up in the Accessibility tree (`crate::ax`, macOS only).
@@ -926,6 +910,8 @@ impl SharedCaptureTelemetry {
             start_glow: AtomicBool::new(false),
             mouse_live: AtomicBool::new(false),
             last_shortcut_ms: AtomicU64::new(0),
+            record_key_up: AtomicBool::new(true),
+            record_key_seen_down: AtomicBool::new(false),
             drag_start: Mutex::new(None),
             agent_context: AtomicBool::new(false),
             shift_press: Mutex::new(None),
@@ -970,14 +956,26 @@ impl SharedCaptureTelemetry {
         let _ = self.ui_sender.try_send(LiveOverlayEvent::Tool(next));
     }
 
-    /// The choose shortcut (`choose_shortcut`).
+    /// A key taken while the record shortcut is held (`set_hold_hotkeys`).
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub fn emit_choose_shortcut(&self) {
+    pub fn emit_hold_key(&self, key: crate::shortcut::HoldKey) {
         if self.shortcuts_paused.load(Ordering::Acquire) {
             return;
         }
-        scrawl_log("emit_choose_shortcut");
-        let _ = self.ui_sender.try_send(LiveOverlayEvent::ChooseShortcut);
+        scrawl_log(format!("emit_hold_key {key:?}"));
+        let _ = self.ui_sender.try_send(LiveOverlayEvent::HoldKey(key));
+    }
+
+    /// The record shortcut's own key went down (Carbon): it's held until `record_key_released`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn record_key_pressed(&self) {
+        self.record_key_up.store(false, Ordering::Release);
+        self.record_key_seen_down.store(false, Ordering::Release);
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn record_key_released(&self) {
+        self.record_key_up.store(true, Ordering::Release);
     }
 
     pub fn emit_paste_shortcut(&self) {
@@ -2113,36 +2111,6 @@ mod tests {
         assert_eq!(tool_modifiers(ctrl_cmd), ctrl_cmd);
         assert_eq!(tool_modifiers(0), opt_shift);
         assert_eq!(tool_modifiers(CARBON_SHIFT_KEY), opt_shift);
-    }
-
-    #[test]
-    fn the_choose_shortcut_is_c_with_the_record_shortcuts_modifiers_unless_taken() {
-        const C: u32 = 8;
-        let record = ShortcutConfig::default_record();
-        let paste = ShortcutConfig::default_paste();
-        let opt_shift = CARBON_OPTION_KEY | CARBON_SHIFT_KEY;
-        assert_eq!(
-            choose_shortcut(&record, &paste, C),
-            Some((C, opt_shift, "⌥⇧C".to_owned()))
-        );
-        let ctrl_opt = CARBON_CONTROL_KEY | CARBON_OPTION_KEY;
-        let custom = ShortcutConfig {
-            key_code: 15,
-            carbon_modifiers: ctrl_opt,
-            label: shortcut_label(ctrl_opt, "R"),
-        };
-        assert_eq!(
-            choose_shortcut(&custom, &paste, C).map(|(_, _, label)| label),
-            Some("⌃⌥C".to_owned())
-        );
-        // A record or paste shortcut on ⌥⇧C keeps it.
-        let on_c = ShortcutConfig {
-            key_code: C,
-            carbon_modifiers: opt_shift,
-            label: shortcut_label(opt_shift, "C"),
-        };
-        assert_eq!(choose_shortcut(&on_c, &paste, C), None);
-        assert_eq!(choose_shortcut(&record, &on_c, C), None);
     }
 
     #[test]

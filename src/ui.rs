@@ -38,6 +38,8 @@ use crate::sketch::timeline;
 #[cfg(target_os = "windows")]
 use crate::win::overlay::InkOverlay as LaserOverlay;
 
+/// A modifier-less shortcut held this long is dropped, in case its key-up was missed.
+const HOLD_GIVE_UP: Duration = Duration::from_secs(30);
 const SIDEBAR_BG: u32 = 0x111111;
 const CANVAS_BG: u32 = 0x161616;
 const SURFACE_BG: u32 = 0x1d1d1d;
@@ -828,6 +830,11 @@ pub struct ScrawlCoordinator {
     shortcut: crate::shortcut::Shortcut,
     /// The modifiers held when the shortcut went down; releasing any of them starts the recording.
     hold_mods: u64,
+    /// Tab, the arrows and Esc are taken while the shortcut is held (`rememberSelection`,
+    /// `capture::set_hold_hotkeys`); with no modifiers, its own key is what's held.
+    hold_keys: bool,
+    /// When the pending press went down.
+    pressed_at: Option<Instant>,
     /// `scrawl lab pill`: recordings are pretend (`CaptureSource::Lab`), the picker takes no
     /// input and opens no overlay, and nothing looks for windows or phones.
     lab: bool,
@@ -909,6 +916,8 @@ impl ScrawlCoordinator {
             gate: crate::onboarding::Gate::default(),
             shortcut: crate::shortcut::Shortcut::default(),
             hold_mods: 0,
+            hold_keys: false,
+            pressed_at: None,
             lab: false,
         }
     }
@@ -1264,10 +1273,23 @@ impl ScrawlCoordinator {
             }
             self.begin_playback();
             self.hold_mods = crate::capture::modifier_flags();
+            self.hold_keys = crate::handoff::experiment("rememberSelection");
             // An Esc from before this press doesn't cancel it.
             self.telemetry.take_escape();
         }
         let action = self.shortcut.press(activity);
+        self.apply_shortcut(action, cx);
+        if self.shortcut.is_pending() && self.pressed_at.is_none() {
+            self.pressed_at = Some(Instant::now());
+            if self.hold_keys {
+                crate::capture::set_hold_hotkeys(&self.telemetry, true);
+            }
+        }
+    }
+
+    /// Tab, an arrow or Esc while the record shortcut is held (`capture::set_hold_hotkeys`).
+    pub fn press_hold_key(&mut self, key: crate::shortcut::HoldKey, cx: &mut Context<Self>) {
+        let action = self.shortcut.hold_key(key);
         self.apply_shortcut(action, cx);
     }
 
@@ -1281,8 +1303,24 @@ impl ScrawlCoordinator {
             self.shortcut.escape()
         } else {
             let mods = crate::capture::modifier_flags();
-            let held = self.hold_mods != 0 && mods & self.hold_mods == self.hold_mods;
-            self.shortcut.tick(held)
+            let held = if self.hold_mods != 0 {
+                mods & self.hold_mods == self.hold_mods
+            } else {
+                // A shortcut without modifiers (F16, say) is held while its own key is down.
+                self.hold_keys && crate::capture::record_key_held(&self.telemetry)
+            };
+            if held
+                && self.hold_mods == 0
+                && self
+                    .pressed_at
+                    .is_some_and(|at| at.elapsed() > HOLD_GIVE_UP)
+            {
+                // Its key-up was never seen: drop the press rather than wait on it forever.
+                scrawl_log("shortcut held too long: cancelled");
+                self.shortcut.escape()
+            } else {
+                self.shortcut.tick(held)
+            }
         };
         self.apply_shortcut(action, cx);
     }
@@ -1297,10 +1335,64 @@ impl ScrawlCoordinator {
             Action::Cancel => {
                 // Esc can cancel before the picker or a recording exists.
                 self.playback.take();
+                if self.is_selecting() {
+                    self.cancel_recording(cx);
+                }
             }
+            Action::Step { forward } => self.step_choice(forward, cx),
+            Action::RecordChosen => self.record_choice(cx),
             Action::RecordScreen => self.record_shortcut_target(cx),
             Action::RecordSelected => self.record_selected_mode(cx),
             Action::Finish => self.finish_recording(cx),
+        }
+        if !self.shortcut.is_pending() && self.pressed_at.take().is_some() && self.hold_keys {
+            crate::capture::set_hold_hotkeys(&self.telemetry, false);
+        }
+    }
+
+    /// Tab or an arrow while the shortcut is held: the picker opens on the mode after (or before)
+    /// the one a tap records, and each further press moves on.
+    fn step_choice(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let has_iphone = self.iphone.is_some();
+        if let Some(mode) = self.selection_mode() {
+            self.choose_selection_mode(mode.cycled(forward, has_iphone), cx);
+            return;
+        }
+        if !self.ready_to_record() {
+            return;
+        }
+        let from = self
+            .last_selection
+            .as_ref()
+            .map_or(SelectionMode::Screen, |last| match last.mode {
+                CaptureMode::Window => SelectionMode::Window,
+                CaptureMode::Region => SelectionMode::Area,
+                CaptureMode::Device => SelectionMode::Iphone,
+                CaptureMode::Display => SelectionMode::Screen,
+            });
+        let mode = from.cycled(forward, has_iphone);
+        self.open_picker(Some(mode), cx);
+        if mode == SelectionMode::Iphone {
+            self.preview_iphone(cx);
+        }
+    }
+
+    /// The shortcut let go after choosing: what the picker has lit. Window records the window
+    /// under the pointer; Area, or Window over no window, waits in the picker for a drag or click.
+    fn record_choice(&mut self, cx: &mut Context<Self>) {
+        match self.selection_mode() {
+            None => self.record_shortcut_target(cx),
+            Some(SelectionMode::Area) => {}
+            Some(SelectionMode::Window) => {
+                let under = current_mouse_screen().and_then(|[x, y]| {
+                    selectable_window_at(&self.selectable_windows, f64::from(x), f64::from(y))
+                        .cloned()
+                });
+                if let Some(target) = under {
+                    self.start_recording_with_target(target, cx);
+                }
+            }
+            Some(SelectionMode::Screen | SelectionMode::Iphone) => self.record_selected_mode(cx),
         }
     }
 
@@ -1553,32 +1645,6 @@ impl ScrawlCoordinator {
             self.highlight_since = motion::now();
             self.island_morph = Morph::Switch;
             self.switch = Some(SwitchMorph { slide: None });
-        }
-    }
-
-    /// The choose shortcut (⌥⇧C, `capture::choose_shortcut`): the picker, on the mode last used;
-    /// pressed in the picker, its next mode. A recording is dropped to choose again, as the
-    /// capsule's chips do.
-    pub fn press_choose(&mut self, cx: &mut Context<Self>) {
-        if let Some(mode) = self.selection_mode() {
-            let has_iphone = self.iphone.is_some();
-            self.choose_selection_mode(mode.cycled(true, has_iphone), cx);
-        } else {
-            self.choose_target(cx);
-        }
-    }
-
-    /// Choose what to record in the picker, dropping a recording that's running.
-    fn choose_target(&mut self, cx: &mut Context<Self>) {
-        if self.is_recording() {
-            scrawl_log("choose shortcut -> picker");
-            let current = self.recording_mode();
-            let chips_shown = self.reveal.is_open();
-            if let Some((_, overlay)) = self.discard_recording() {
-                self.reopen_picker(overlay, current, chips_shown, None, cx);
-            }
-        } else if !self.is_selecting() && !self.is_processing() {
-            self.begin_target_selection(cx);
         }
     }
 
@@ -5830,7 +5896,7 @@ pub fn run_app(
                     while let Ok(ev) = ui_receiver.try_recv() {
                         loop_coord.update(cx, |coord, cx| match ev {
                             LiveOverlayEvent::CaptureShortcut => coord.press_shortcut(cx),
-                            LiveOverlayEvent::ChooseShortcut => coord.press_choose(cx),
+                            LiveOverlayEvent::HoldKey(key) => coord.press_hold_key(key, cx),
                             LiveOverlayEvent::PasteLatestShortcut => {
                                 if !coord.is_recording() && !coord.is_selecting() {
                                     coord.paste_latest(cx);

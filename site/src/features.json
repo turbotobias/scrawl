@@ -45,12 +45,12 @@
       "id": "remember-selection",
       "group": "start",
       "name": "Record what you chose last",
-      "says": "The shortcut records the window, area, screen or iPhone you chose last, while it's still there (if the window closed, its app's front window); ⌥⇧C chooses another in the picker (again for the next mode). The chips light what's recorded and the menu names it.",
+      "says": "The shortcut records the window, area, screen or iPhone you chose last, while it's still there (if the window closed, its app's front window); hold the shortcut and tap Tab to choose another in the picker, and let go to record it. The chips light what's recorded and the menu names it.",
       "status": "experiment:rememberSelection",
       "platforms": ["mac", "windows", "linux"],
       "added": "2026-11-11",
       "note": "Tried on a Mac only. When the choice is gone the screen is recorded and the choice kept.",
-      "shortcuts": [{"keys": "⌥⇧C", "does": "Choose what to record in the picker; in the picker, the next mode (Mac)"}],
+      "shortcuts": [{"keys": "hold ⌥⇧S + Tab", "does": "Step through Area, Window, Screen and iPhone (⇧Tab or ← back, Esc cancels); let go to record what's lit (Mac)"}],
       "docs": ["README.md#capture-controls", "docs/capture.md", "docs/keyframes-and-text.md"]
     },
     {

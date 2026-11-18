@@ -1,6 +1,8 @@
 //! The capture shortcut. Press ⌥⇧S, briefly or held, and the display under the pointer starts
 //! recording as the keys come up; the recording's capsule shows Area · Window · Screen · iPhone
-//! as chips for a few seconds (`Reveal`), so the target can still change.
+//! as chips for a few seconds (`Reveal`), so the target can still change. With the
+//! `rememberSelection` experiment, Tab or an arrow while the shortcut is still held chooses what
+//! to record in the picker instead (`HoldKey`), and letting go records what it has lit.
 
 /// A press this soon after a recording starts is a double press, not "finish".
 pub const DOUBLE_PRESS_MS: u64 = 400;
@@ -27,6 +29,13 @@ pub enum Action {
     Cancel,
     /// The picker is open: record what it is on.
     RecordSelected,
+    /// Tab or an arrow while the shortcut is held: the next (or previous) of Area · Window ·
+    /// Screen · iPhone, in the picker.
+    Step {
+        forward: bool,
+    },
+    /// The keys came up after a `Step`: record what the picker has lit.
+    RecordChosen,
     Finish,
 }
 
@@ -35,6 +44,19 @@ pub enum Action {
 pub struct Shortcut {
     /// ⌥⇧S went down and its modifiers aren't all up yet.
     pending: bool,
+    /// A `Step` came while pending, so letting go records the picker's choice.
+    chose: bool,
+}
+
+/// A key Scrawl takes only while the shortcut is held (`rememberSelection`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoldKey {
+    /// Tab or →.
+    Next,
+    /// ⇧Tab or ←.
+    Previous,
+    /// Esc.
+    Cancel,
 }
 
 impl Shortcut {
@@ -65,13 +87,32 @@ impl Shortcut {
     pub fn tick(&mut self, held: bool) -> Action {
         if self.pending && !held {
             self.pending = false;
-            Action::RecordScreen
+            if std::mem::take(&mut self.chose) {
+                Action::RecordChosen
+            } else {
+                Action::RecordScreen
+            }
         } else {
             Action::None
         }
     }
 
+    /// A `HoldKey` while the shortcut is held.
+    pub fn hold_key(&mut self, key: HoldKey) -> Action {
+        match key {
+            _ if !self.pending => Action::None,
+            HoldKey::Cancel => self.escape(),
+            HoldKey::Next | HoldKey::Previous => {
+                self.chose = true;
+                Action::Step {
+                    forward: key == HoldKey::Next,
+                }
+            }
+        }
+    }
+
     pub fn escape(&mut self) -> Action {
+        self.chose = false;
         if std::mem::take(&mut self.pending) {
             Action::Cancel
         } else {
@@ -170,6 +211,32 @@ mod tests {
         }
         // S pressed again while ⌥⇧ is still down changes nothing.
         assert_eq!(s.press(FREE), Action::None);
+        assert_eq!(s.tick(false), Action::RecordScreen);
+    }
+
+    #[test]
+    fn tab_while_held_chooses_and_letting_go_records_the_choice() {
+        let mut s = Shortcut::default();
+        // Not held: Tab is the app's, and nothing reaches here.
+        assert_eq!(s.hold_key(HoldKey::Next), Action::None);
+        s.press(FREE);
+        assert_eq!(s.tick(true), Action::None);
+        assert_eq!(s.hold_key(HoldKey::Next), Action::Step { forward: true });
+        assert_eq!(
+            s.hold_key(HoldKey::Previous),
+            Action::Step { forward: false }
+        );
+        assert_eq!(s.tick(true), Action::None);
+        assert_eq!(s.tick(false), Action::RecordChosen);
+        // The next tap records what was chosen last again.
+        s.press(FREE);
+        assert_eq!(s.tick(false), Action::RecordScreen);
+        // Esc while choosing drops it all.
+        s.press(FREE);
+        s.hold_key(HoldKey::Next);
+        assert_eq!(s.hold_key(HoldKey::Cancel), Action::Cancel);
+        assert_eq!(s.tick(false), Action::None);
+        s.press(FREE);
         assert_eq!(s.tick(false), Action::RecordScreen);
     }
 
