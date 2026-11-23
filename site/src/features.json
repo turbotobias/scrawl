@@ -709,6 +709,18 @@
       "config": [{ "key": "microphone", "value": "{\"id\", \"name\"}", "does": "Chosen input; absent follows the system" }],
       "docs": ["README.md#settings"]
     },
+    {
+      "id": "backup-mics",
+      "group": "settings",
+      "name": "Backup microphones",
+      "says": "Up to three inputs record at once, in an order you set in Settings; each second comes from the first that hears you, so headphones that hop to the iPhone partway don't lose what you said.",
+      "status": "experiment:backupMics",
+      "platforms": ["mac"],
+      "added": "2026-11-23",
+      "note": "Without an order it's the chosen input, then the built-in microphone. The iPhone mirror's narration uses one input.",
+      "config": [{ "key": "microphones", "value": "[{\"id\", \"name\"}, …]", "does": "Inputs in priority order; \"default\" is the macOS default" }],
+      "docs": ["README.md#settings", "docs/keyframes-and-text.md", "docs/onboarding-and-settings.md"]
+    },
 
     {
       "id": "retention",

@@ -485,6 +485,9 @@ pub struct Config {
     /// The microphone Mac captures record from (`mic`); absent follows the macOS default.
     #[serde(default)]
     pub microphone: Option<crate::mic::Choice>,
+    /// The inputs a capture records from at once, first preferred (`backupMics`, `mic`).
+    #[serde(default)]
+    pub microphones: Option<Vec<crate::mic::Choice>>,
     /// Smart routing's settings (`routing::look`).
     #[serde(default)]
     pub routing: Option<RoutingConfig>,

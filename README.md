@@ -193,6 +193,15 @@ records from the default instead and says so under the popup (and once in the lo
 meter runs only while the Recording pane is on screen and Microphone is allowed. Cabled-iPhone
 narration uses the same microphone.
 
+**Backup microphones** (experiment `backupMics`) replace the popup with an order of inputs that
+all record at once, so headphones that hop to the iPhone partway, or the wrong input in focus,
+don't lose what you said. Each second of `audio.wav` comes from the first input in the order that
+hears speech in it (the first, whenever it hears you), and the capsule says **Copied · used
+MacBook Pro Microphone from 0:42** when a backup stood in. Move an input up or down, remove it, or
+add another (System default included); without an order of your own it's the chosen input, then
+the Mac's built-in microphone. It's saved as `"microphones": [{"id", "name"}, …]`. At most three
+record at once; a Bluetooth headset's microphone switches it to call quality while it records.
+
 **Show live audio while recording** (off by default, `"liveAudio": true`) puts a waveform beside
 the timer while you record, so you can see the microphone is hearing you: dim dots are silence,
 and a flat red line means the microphone is sending nothing at all. With Apple Speech on macOS 26,

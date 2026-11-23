@@ -1,5 +1,6 @@
 use std::io::Cursor;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -15,6 +16,8 @@ pub struct RecordedAudio {
     pub live: crate::live_transcribe::Slot,
     /// Whether the microphone gave anything (`Sound::of`).
     pub sound: Sound,
+    /// "used MacBook Pro Microphone from 0:42": a backup input stood in (`backupMics`, `merge`).
+    pub switched: Option<String>,
 }
 
 /// What a capture's microphone gave, so a muted, wrong or broken input is noticed when the
@@ -79,11 +82,24 @@ pub struct AudioRecorder {
     stop_sender: Option<std::sync::mpsc::Sender<()>>,
     samples: Arc<Mutex<Vec<f32>>>,
     error: Arc<Mutex<Option<String>>>,
+    /// When the first input's first samples came, to line the backups up with it.
+    first: Arc<OnceLock<Instant>>,
+    /// The first input's name, and the backups recording beside it (`backupMics`).
+    name: Arc<Mutex<String>>,
+    backups: Arc<Mutex<Vec<Backup>>>,
     live: Option<crate::live_transcribe::Live>,
     /// A live transcription only for showing the words (`live_audio`), dropped at stop.
     preview: Option<crate::live_transcribe::Live>,
     /// The capsule's view of this recording (`live_audio::begin`).
     shown: Option<u64>,
+}
+
+/// An input recording beside the first, in case that one hears nothing (`backupMics`).
+struct Backup {
+    name: String,
+    samples: Arc<Mutex<Vec<f32>>>,
+    error: Arc<Mutex<Option<String>>>,
+    first: Arc<OnceLock<Instant>>,
 }
 
 impl AudioRecorder {
@@ -107,16 +123,32 @@ impl AudioRecorder {
         let started = std::time::Instant::now();
         let samples = Arc::new(Mutex::new(Vec::new()));
         let error = Arc::new(Mutex::new(None));
+        let first = Arc::new(OnceLock::new());
+        let name = Arc::new(Mutex::new(String::new()));
+        let backups = Arc::new(Mutex::new(Vec::new()));
         let (stop_sender, stop_receiver) = std::sync::mpsc::channel();
         let worker_samples = Arc::clone(&samples);
         let worker_error = Arc::clone(&error);
+        let worker_first = Arc::clone(&first);
+        let worker_name = Arc::clone(&name);
+        let worker_backups = Arc::clone(&backups);
+        let backup_mics = recording && crate::handoff::experiment("backupMics");
         let worker = std::thread::Builder::new()
             .name("scrawl-audio".into())
             .spawn(move || {
-                let stream =
-                    Self::open_stream(worker_samples, worker_error).inspect_err(|error| {
-                        crate::capture::scrawl_log(format!("Microphone startup failed: {error:#}"));
-                    })?;
+                let first = Track {
+                    samples: worker_samples,
+                    error: worker_error,
+                    first: worker_first,
+                };
+                let stream = if backup_mics {
+                    Self::open_streams(first, &worker_name, &worker_backups)
+                } else {
+                    Self::open_stream(first).map(|stream| vec![stream])
+                }
+                .inspect_err(|error| {
+                    crate::capture::scrawl_log(format!("Microphone startup failed: {error:#}"));
+                })?;
                 if recording {
                     crate::ui::start_metric("audio_ready_ms", started);
                 }
@@ -148,18 +180,79 @@ impl AudioRecorder {
             stop_sender: Some(stop_sender),
             samples,
             error,
+            first,
+            name,
+            backups,
             live,
             preview,
             shown,
         })
     }
 
+    /// Every input `mic::recording_order` names, at once: the first that opens fills `first`,
+    /// the others record as backups. Falls back to `open_stream` when none opens.
+    fn open_streams(
+        first: Track,
+        name: &Mutex<String>,
+        backups: &Mutex<Vec<Backup>>,
+    ) -> Result<Vec<cpal::Stream>> {
+        let inputs = crate::mic::inputs();
+        let order = crate::mic::recording_order(
+            crate::mic::order().as_deref(),
+            crate::mic::choice().as_ref(),
+            &inputs,
+        );
+        let mut streams = Vec::new();
+        for input in &order {
+            let Some(device) = crate::mic::device(&input.id) else {
+                continue;
+            };
+            let track = if streams.is_empty() {
+                first.clone()
+            } else {
+                Track::default()
+            };
+            match Self::open_device(&device, track.clone()) {
+                Ok(stream) => {
+                    crate::capture::scrawl_log(format!(
+                        "Microphone {} of {}: {}",
+                        streams.len() + 1,
+                        order.len(),
+                        input.name
+                    ));
+                    if streams.is_empty() {
+                        *name
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            input.name.clone();
+                    } else {
+                        backups
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push(Backup {
+                                name: input.name.clone(),
+                                samples: track.samples,
+                                error: track.error,
+                                first: track.first,
+                            });
+                    }
+                    streams.push(stream);
+                }
+                Err(e) => crate::capture::scrawl_log(format!(
+                    "Microphone: could not open {} ({e:#})",
+                    input.name
+                )),
+            }
+        }
+        if streams.is_empty() {
+            streams.push(Self::open_stream(first)?);
+        }
+        Ok(streams)
+    }
+
     /// The chosen microphone (`mic`), else the macOS default. A chosen device that is missing or
     /// won't open never stops the recording.
-    fn open_stream(
-        samples: Arc<Mutex<Vec<f32>>>,
-        error: Arc<Mutex<Option<String>>>,
-    ) -> Result<cpal::Stream> {
+    fn open_stream(track: Track) -> Result<cpal::Stream> {
         let choice = crate::mic::choice();
         if let Some(choice) = &choice {
             if let Some(device) = crate::mic::device(&choice.id) {
@@ -168,7 +261,7 @@ impl AudioRecorder {
                     name: device_name(&device).unwrap_or_else(|| choice.name.clone()),
                 };
                 crate::mic::note_pick(&crate::mic::Pick::Chosen(&input));
-                match Self::open_device(&device, samples.clone(), error.clone()) {
+                match Self::open_device(&device, track.clone()) {
                     Ok(stream) => {
                         crate::capture::scrawl_log(format!("Microphone: {}", input.name));
                         return Ok(stream);
@@ -190,6 +283,7 @@ impl AudioRecorder {
                 let inputs = crate::mic::Inputs {
                     default: default.as_ref().map(|d| d.id.clone()),
                     devices: default.into_iter().collect(),
+                    built_in: None,
                 };
                 crate::mic::note_pick(&crate::mic::Pick::new(Some(choice), &inputs));
             }
@@ -197,7 +291,7 @@ impl AudioRecorder {
         let device = cpal::default_host()
             .default_input_device()
             .context("No microphone is available")?;
-        let stream = Self::open_device(&device, samples, error)?;
+        let stream = Self::open_device(&device, track)?;
         crate::capture::scrawl_log(format!(
             "Microphone: {} (default)",
             device_name(&device).unwrap_or_default()
@@ -205,11 +299,7 @@ impl AudioRecorder {
         Ok(stream)
     }
 
-    fn open_device(
-        device: &cpal::Device,
-        samples: Arc<Mutex<Vec<f32>>>,
-        error: Arc<Mutex<Option<String>>>,
-    ) -> Result<cpal::Stream> {
+    fn open_device(device: &cpal::Device, track: Track) -> Result<cpal::Stream> {
         let supported = device.default_input_config()?;
         let config = supported.config();
         crate::capture::scrawl_log(format!(
@@ -224,7 +314,7 @@ impl AudioRecorder {
         );
         macro_rules! stream {
             ($ty:ty) => {
-                input_stream::<$ty>(&device, config, samples.clone(), error.clone())?
+                input_stream::<$ty>(&device, config, track.clone())?
             };
         }
         let stream = match supported.sample_format() {
@@ -272,6 +362,11 @@ impl AudioRecorder {
                 .lock()
                 .map_err(|_| anyhow!("Microphone buffer lock poisoned"))?,
         );
+        let (samples_16k, switched, backups_broke) = self.merge_backups(samples_16k);
+        if switched.is_some() {
+            // The words heard live came from the first input alone.
+            self.live.take();
+        }
         // An overload, or a device unplugged partway, keeps what was heard before it.
         if let Some(error) = &error {
             if samples_16k.is_empty() {
@@ -279,7 +374,7 @@ impl AudioRecorder {
             }
             crate::capture::scrawl_log(format!("Microphone: {error}; keeping what it heard"));
         }
-        let sound = Sound::of(&samples_16k, error.is_some());
+        let sound = Sound::of(&samples_16k, error.is_some() && backups_broke);
         let sample_count = samples_16k.len();
         let duration_ms = sample_count as u64 * 1_000 / SAMPLE_RATE as u64;
         let wav_bytes = encode_wav_16k(&samples_16k)?;
@@ -289,8 +384,179 @@ impl AudioRecorder {
             wav_bytes,
             live: crate::live_transcribe::Slot::new(self.live.take()),
             sound,
+            switched,
         })
     }
+
+    /// The first input's samples merged with the backups' (`merge`), with what stood in and
+    /// whether every backup broke off too (true without backups).
+    fn merge_backups(&self, first: Vec<f32>) -> (Vec<f32>, Option<String>, bool) {
+        let backups = std::mem::take(
+            &mut *self
+                .backups
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if backups.is_empty() {
+            return (first, None, true);
+        }
+        let start = self.first.get().copied();
+        let mut names = vec![
+            self.name
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        ];
+        let mut takes = vec![first];
+        let mut all_broke = true;
+        for backup in backups {
+            let mut samples = std::mem::take(
+                &mut *backup
+                    .samples
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            if let Some(error) = backup
+                .error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                crate::capture::scrawl_log(format!("Microphone {}: {error}", backup.name));
+            } else {
+                all_broke = false;
+            }
+            // Lined up with the first input by when each one's samples began.
+            let late_ms = match (start, backup.first.get()) {
+                (Some(a), Some(&b)) if b >= a => b.duration_since(a).as_secs_f64() * 1e3,
+                (Some(a), Some(&b)) => -a.duration_since(b).as_secs_f64() * 1e3,
+                _ => 0.0,
+            };
+            align(
+                &mut samples,
+                (late_ms * f64::from(SAMPLE_RATE) / 1e3) as i64,
+            );
+            takes.push(samples);
+            names.push(backup.name);
+        }
+        let (merged, chosen) = merge(&takes);
+        let switched = chosen.iter().position(|&t| t != 0).map(|seg| {
+            let name = &names[chosen[seg]];
+            format!("used {name} from {}", clock(seg as u64 * 1_000))
+        });
+        crate::capture::scrawl_log(format!(
+            "Microphones: {} · {}",
+            names.join(", "),
+            switched.as_deref().unwrap_or("the first heard it all")
+        ));
+        (merged, switched, all_broke)
+    }
+}
+
+/// The input samples a stream fills, with its error and when its first samples came.
+#[derive(Clone, Default)]
+struct Track {
+    samples: Arc<Mutex<Vec<f32>>>,
+    error: Arc<Mutex<Option<String>>>,
+    first: Arc<OnceLock<Instant>>,
+}
+
+/// Shifts `samples` later by `late` samples (silence before), or earlier when negative.
+fn align(samples: &mut Vec<f32>, late: i64) {
+    if late > 0 {
+        samples.splice(0..0, std::iter::repeat_n(0.0, late as usize));
+    } else {
+        samples.drain(..(late.unsigned_abs() as usize).min(samples.len()));
+    }
+}
+
+/// A second of each input is compared when merging.
+const SEGMENT: usize = SAMPLE_RATE as usize;
+/// A 50 ms window this much louder than its input's quiet (and louder than `SPEECH_MIN_DB`) is
+/// someone speaking into it.
+const SPEECH_OVER_QUIET_DB: f32 = 15.0;
+const SPEECH_MIN_DB: f32 = -60.0;
+/// Windows of speech it takes for an input to have heard a second.
+const SPEECH_WINDOWS: usize = 3;
+/// A switch between inputs fades across 10 ms.
+const FADE: usize = SAMPLE_RATE as usize / 100;
+
+/// One track from inputs recorded at once (`backupMics`), lined up and the preferred first: each
+/// second comes from the first input that hears speech in it, so the preferred one whenever it
+/// hears you. A second nobody speaks in stays with the input before it while that one still has
+/// sound. Returns the track and which input each second came from.
+pub fn merge(takes: &[Vec<f32>]) -> (Vec<f32>, Vec<usize>) {
+    let len = takes.iter().map(Vec::len).max().unwrap_or(0);
+    // Each input's level per window; `None` where it sent nothing (or digital silence).
+    let levels: Vec<Vec<Option<f32>>> = takes
+        .iter()
+        .map(|take| {
+            take.chunks(WINDOW)
+                .map(|w| {
+                    if w.iter().all(|x| x.abs() < DEAD) {
+                        return None;
+                    }
+                    let rms = (w.iter().map(|x| x * x).sum::<f32>() / w.len() as f32).sqrt();
+                    Some(20.0 * rms.max(1e-9).log10())
+                })
+                .collect()
+        })
+        .collect();
+    // Its quiet: the level a fifth of its windows are under.
+    let quiet: Vec<Option<f32>> = levels
+        .iter()
+        .map(|levels| {
+            let mut heard: Vec<f32> = levels.iter().flatten().copied().collect();
+            heard.sort_by(f32::total_cmp);
+            heard.get(heard.len() / 5).copied()
+        })
+        .collect();
+    let per_segment = SEGMENT / WINDOW;
+    let mut chosen: Vec<usize> = Vec::new();
+    let mut current = 0;
+    for segment in 0..len.div_ceil(SEGMENT) {
+        let windows = |t: usize| {
+            let all = &levels[t];
+            let start = (segment * per_segment).min(all.len());
+            &all[start..((segment + 1) * per_segment).min(all.len())]
+        };
+        let hears = |t: usize| {
+            quiet[t].is_some_and(|quiet| {
+                windows(t)
+                    .iter()
+                    .flatten()
+                    .filter(|&&db| db >= quiet + SPEECH_OVER_QUIET_DB && db >= SPEECH_MIN_DB)
+                    .count()
+                    >= SPEECH_WINDOWS
+            })
+        };
+        let sounds = |t: usize| windows(t).iter().any(Option::is_some);
+        current = (0..takes.len())
+            .find(|&t| hears(t))
+            .or_else(|| sounds(current).then_some(current))
+            .or_else(|| (0..takes.len()).find(|&t| sounds(t)))
+            .unwrap_or(current);
+        chosen.push(current);
+    }
+    let sample = |t: usize, i: usize| takes[t].get(i).copied().unwrap_or(0.0);
+    let mut merged = vec![0.0; len];
+    for (segment, &t) in chosen.iter().enumerate() {
+        let start = segment * SEGMENT;
+        let end = (start + SEGMENT).min(len);
+        for (i, out) in merged[start..end].iter_mut().enumerate() {
+            *out = sample(t, start + i);
+        }
+        if let Some(&before) = segment.checked_sub(1).and_then(|s| chosen.get(s))
+            && before != t
+        {
+            for k in 0..FADE.min(end - start) {
+                let w = k as f32 / FADE as f32;
+                merged[start + k] =
+                    sample(before, start + k) * (1.0 - w) + sample(t, start + k) * w;
+            }
+        }
+    }
+    (merged, chosen)
 }
 
 impl AudioRecorder {
@@ -317,13 +583,17 @@ fn device_name(device: &cpal::Device) -> Option<String> {
 fn input_stream<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
-    samples: Arc<Mutex<Vec<f32>>>,
-    error: Arc<Mutex<Option<String>>>,
+    track: Track,
 ) -> Result<cpal::Stream>
 where
     T: cpal::SizedSample,
     f32: cpal::FromSample<T>,
 {
+    let Track {
+        samples,
+        error,
+        first,
+    } = track;
     let channels = usize::from(config.channels);
     let rate = config.sample_rate;
     let mut phase = 0_u32;
@@ -331,6 +601,7 @@ where
     Ok(device.build_input_stream::<T, _, _>(
         config,
         move |data, _| {
+            first.get_or_init(Instant::now);
             let Ok(mut output) = samples.lock() else {
                 return;
             };
@@ -378,6 +649,7 @@ pub fn recorded_audio_from_wav(wav_bytes: Vec<u8>) -> Result<RecordedAudio> {
         duration_ms: sample_count as u64 * 1_000 / u64::from(SAMPLE_RATE),
         wav_bytes,
         live: Default::default(),
+        switched: None,
         sound: Sound::Heard,
     })
 }
@@ -518,6 +790,9 @@ mod tests {
             stop_sender: Some(stop_sender),
             samples,
             error: Arc::new(Mutex::new(None)),
+            first: Default::default(),
+            name: Default::default(),
+            backups: Default::default(),
             live: None,
             preview: None,
             shown: None,
@@ -554,7 +829,10 @@ mod tests {
         short[9 * second..].fill(0.0);
         assert_eq!(Sound::of(&short, false), Sound::Heard);
         // An input that errored partway stopped where its samples end.
-        assert_eq!(Sound::of(&hiss[..5 * second], true), Sound::StoppedAt(5_000));
+        assert_eq!(
+            Sound::of(&hiss[..5 * second], true),
+            Sound::StoppedAt(5_000)
+        );
 
         assert_eq!(Sound::Heard.warning(), None);
         assert_eq!(Sound::Nothing.warning().as_deref(), Some("no sound"));
@@ -564,6 +842,71 @@ mod tests {
         );
     }
 
+    /// `seconds` of an input: quiet hiss at `quiet` (0 for none), with speech (a -20 dB tone)
+    /// through the seconds `speaking` names.
+    fn input(seconds: usize, quiet: f32, speaking: impl Fn(usize) -> bool) -> Vec<f32> {
+        (0..seconds * SAMPLE_RATE as usize)
+            .map(|i| {
+                let hiss = if i % 2 == 0 { quiet } else { -quiet };
+                if speaking(i / SAMPLE_RATE as usize) {
+                    0.1 * (i as f32 * 0.2).sin()
+                } else {
+                    hiss
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn backups_stand_in_only_where_the_first_input_hears_nothing() {
+        let talk = |s: usize| s % 3 != 2;
+        let airpods = input(9, 0.0005, talk);
+        let mac = input(9, 0.003, talk);
+        // The first hears it all: it alone, untouched.
+        let (merged, chosen) = merge(&[airpods.clone(), mac.clone()]);
+        assert_eq!(chosen, vec![0; 9]);
+        assert_eq!(merged, airpods);
+
+        // AirPods go to the iPhone 4 s in: zeros from then (or no samples at all).
+        let mut gone = airpods.clone();
+        gone[4 * SAMPLE_RATE as usize..].fill(0.0);
+        let (merged, chosen) = merge(&[gone.clone(), mac.clone()]);
+        assert_eq!(chosen, [0, 0, 0, 0, 1, 1, 1, 1, 1]);
+        assert_eq!(merged.len(), mac.len());
+        assert_eq!(
+            merged[6 * SAMPLE_RATE as usize],
+            mac[6 * SAMPLE_RATE as usize]
+        );
+        let (_, chosen) = merge(&[airpods[..4 * SAMPLE_RATE as usize].to_vec(), mac.clone()]);
+        assert_eq!(chosen, [0, 0, 0, 0, 1, 1, 1, 1, 1]);
+
+        // A wrong input that only hisses: the backup, from the first word.
+        let (_, chosen) = merge(&[input(9, 0.0005, |_| false), mac.clone()]);
+        assert_eq!(chosen, [1; 9]);
+
+        // Back from the backup as soon as the first hears speech again; a quiet second stays.
+        let mut dropout = airpods.clone();
+        dropout[3 * SAMPLE_RATE as usize..5 * SAMPLE_RATE as usize].fill(0.0);
+        let (_, chosen) = merge(&[dropout, mac.clone()]);
+        assert_eq!(chosen, [0, 0, 0, 1, 1, 1, 0, 0, 0]);
+
+        // Nobody speaks: the first, all the way.
+        let (_, chosen) = merge(&[input(4, 0.0005, |_| false), input(4, 0.003, |_| false)]);
+        assert_eq!(chosen, [0; 4]);
+    }
+
+    #[test]
+    fn a_backup_lines_up_with_the_first_input_by_when_it_began() {
+        let mut late = vec![1.0, 2.0];
+        align(&mut late, 2);
+        assert_eq!(late, [0.0, 0.0, 1.0, 2.0]);
+        let mut early = vec![1.0, 2.0, 3.0];
+        align(&mut early, -2);
+        assert_eq!(early, [3.0]);
+        align(&mut early, -5);
+        assert!(early.is_empty());
+    }
+
     #[test]
     fn a_device_lost_partway_keeps_what_it_heard() {
         let recorder = |samples: Vec<f32>| AudioRecorder {
@@ -571,6 +914,9 @@ mod tests {
             stop_sender: None,
             samples: Arc::new(Mutex::new(samples)),
             error: Arc::new(Mutex::new(Some("Device disconnected".into()))),
+            first: Default::default(),
+            name: Default::default(),
+            backups: Default::default(),
             live: None,
             preview: None,
             shown: None,
@@ -586,6 +932,9 @@ mod tests {
             stop_sender: None,
             samples: Arc::new(Mutex::new(Vec::new())),
             error: Arc::new(Mutex::new(None)),
+            first: Default::default(),
+            name: Default::default(),
+            backups: Default::default(),
             live: None,
             preview: None,
             shown: None,

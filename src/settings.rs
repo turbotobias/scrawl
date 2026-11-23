@@ -623,6 +623,9 @@ pub struct View {
     pub auto_send: bool,
     pub shortcuts: Vec<ShortcutView>,
     pub microphone: MicrophoneView,
+    /// The inputs a capture records from at once, first preferred (`backupMics`); `None`
+    /// without the experiment, and the window shows the popup instead.
+    pub microphones: Option<MicrophonesView>,
     /// Show what the microphone hears while recording (`liveAudio`).
     pub live_audio: bool,
     pub transcriber: TranscriberView,
@@ -765,6 +768,78 @@ pub struct MicrophoneView {
     pub note: Option<String>,
     /// The device whose level the window shows, only once Microphone is allowed.
     pub meter: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MicrophonesView {
+    /// What records, first preferred (`mic::effective_order`).
+    pub order: Vec<MicRowView>,
+    /// What could be added: the default and the connected inputs not in `order`.
+    pub others: Vec<MicRowView>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MicRowView {
+    pub id: String,
+    pub title: String,
+    pub connected: bool,
+}
+
+fn microphones_view(
+    saved: Option<&[crate::mic::Choice]>,
+    choice: Option<&crate::mic::Choice>,
+    inputs: Option<&crate::mic::Inputs>,
+) -> MicrophonesView {
+    use crate::mic::SYSTEM_DEFAULT;
+    let empty = crate::mic::Inputs::default();
+    let loaded = inputs.is_some();
+    let inputs = inputs.unwrap_or(&empty);
+    let default_title = match inputs.default_input() {
+        Some(input) => format!("System default ({})", input.name),
+        None => "System default".to_owned(),
+    };
+    let order: Vec<MicRowView> = crate::mic::effective_order(saved, choice, inputs)
+        .into_iter()
+        .map(|entry| {
+            let input = inputs.find(&entry.id);
+            MicRowView {
+                title: if entry.id == SYSTEM_DEFAULT {
+                    default_title.clone()
+                } else {
+                    input.map_or(entry.name.clone(), |i| i.name.clone())
+                },
+                // Until the first list arrives, nothing shows as missing.
+                connected: !loaded
+                    || if entry.id == SYSTEM_DEFAULT {
+                        inputs.default.is_some()
+                    } else {
+                        input.is_some()
+                    },
+                id: entry.id,
+            }
+        })
+        .collect();
+    let listed = |id: &str| order.iter().any(|row| row.id == id);
+    let mut others = Vec::new();
+    if !listed(SYSTEM_DEFAULT) {
+        others.push(MicRowView {
+            id: SYSTEM_DEFAULT.into(),
+            title: default_title.clone(),
+            connected: true,
+        });
+    }
+    others.extend(
+        inputs
+            .devices
+            .iter()
+            .filter(|input| !listed(&input.id))
+            .map(|input| MicRowView {
+                id: input.id.clone(),
+                title: input.name.clone(),
+                connected: true,
+            }),
+    );
+    MicrophonesView { order, others }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1205,6 +1280,19 @@ impl Panel {
             {
                 write(key, value.clone());
             }
+            ("microphones", serde_json::Value::Array(ids)) => {
+                let inputs = self.inputs.clone().unwrap_or_default();
+                let before = crate::mic::order_in(&path).unwrap_or_default();
+                let ids: Vec<String> = ids
+                    .iter()
+                    .filter_map(|id| id.as_str().map(str::to_owned))
+                    .collect();
+                if !ids.is_empty()
+                    && let Err(error) = crate::mic::save_order_in(&path, &ids, &inputs, &before)
+                {
+                    crate::capture::scrawl_log(format!("Saving microphones failed: {error:#}"));
+                }
+            }
             ("microphone", serde_json::Value::String(id)) => {
                 let inputs = self.inputs.clone().unwrap_or_default();
                 if let Err(error) = crate::mic::save_in(&path, id, &inputs) {
@@ -1352,6 +1440,13 @@ impl Panel {
                 self.inputs.as_ref(),
                 self.status(Permission::Microphone) == Status::Granted,
             ),
+            microphones: crate::handoff::experiment("backupMics").then(|| {
+                microphones_view(
+                    config.microphones.as_deref(),
+                    config.microphone.as_ref(),
+                    self.inputs.as_ref(),
+                )
+            }),
             live_audio: config.live_audio.unwrap_or(false),
             lower_playback: config.lower_playback.unwrap_or(false),
             playback_level: config.recording_volume(),
@@ -2432,6 +2527,58 @@ mod tests {
     }
 
     #[test]
+    fn backup_microphones_show_in_order_with_what_could_be_added() {
+        use crate::mic::{Choice, Input, Inputs};
+        let input = |id: &str, name: &str| Input {
+            id: id.into(),
+            name: name.into(),
+        };
+        let inputs = Inputs {
+            devices: vec![
+                input("BuiltInMicrophoneDevice", "MacBook Pro Microphone"),
+                input("usb-1", "Shure MV7"),
+            ],
+            default: Some("usb-1".into()),
+            built_in: Some("BuiltInMicrophoneDevice".into()),
+        };
+        let rows = |rows: &[MicRowView]| {
+            rows.iter()
+                .map(|r| format!("{}{}", r.title, if r.connected { "" } else { " (gone)" }))
+                .collect::<Vec<_>>()
+        };
+        // Nothing saved: the default, then the built-in microphone.
+        let view = microphones_view(None, None, Some(&inputs));
+        assert_eq!(
+            rows(&view.order),
+            ["System default (Shure MV7)", "MacBook Pro Microphone"]
+        );
+        assert_eq!(rows(&view.others), ["Shure MV7"]);
+        // Saved, with AirPods away on the iPhone.
+        let saved = [
+            Choice {
+                id: "airpods".into(),
+                name: "AirPods Pro".into(),
+            },
+            Choice {
+                id: "BuiltInMicrophoneDevice".into(),
+                name: "MacBook Pro Microphone".into(),
+            },
+        ];
+        let view = microphones_view(Some(&saved), None, Some(&inputs));
+        assert_eq!(
+            rows(&view.order),
+            ["AirPods Pro (gone)", "MacBook Pro Microphone"]
+        );
+        assert_eq!(
+            rows(&view.others),
+            ["System default (Shure MV7)", "Shure MV7"]
+        );
+        // Before the first list arrives nothing shows as gone.
+        let view = microphones_view(Some(&saved), None, None);
+        assert!(view.order.iter().all(|r| r.connected));
+    }
+
+    #[test]
     fn the_microphone_popup_follows_what_is_plugged_in() {
         use crate::mic::{Input, Inputs};
         let dir = TempDir::new("mic");
@@ -2448,6 +2595,7 @@ mod tests {
         let both = Inputs {
             devices: vec![built_in.clone(), shure.clone()],
             default: Some(built_in.id.clone()),
+            ..Inputs::default()
         };
         let pick = |panel: &mut Panel, host: &mut Fake, id: &str| {
             panel.on(
@@ -2507,6 +2655,7 @@ mod tests {
         panel.set_inputs(Inputs {
             devices: vec![built_in.clone()],
             default: Some(built_in.id.clone()),
+            ..Inputs::default()
         });
         let mic = panel.view(&host).microphone;
         assert_eq!(mic.value, "Shure MV7");

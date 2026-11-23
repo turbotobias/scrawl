@@ -2,6 +2,11 @@
 //! `~/.config/scrawl/config.json` (absent = the macOS default, followed as it changes). The id is
 //! the CoreAudio device UID, which is also `AVCaptureDevice.uniqueID`; the name is kept only to
 //! say which device is missing. A chosen device that isn't connected falls back to the default.
+//!
+//! With the `backupMics` experiment a capture records from several inputs at once
+//! (`recording_order`): `"microphones": [{"id", "name"}, …]` in priority order, where the id
+//! `"default"` is whichever input macOS has as its default then. Without that key it's the chosen
+//! input (or the default) and then the built-in microphone.
 
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +28,8 @@ pub struct Input {
 pub struct Inputs {
     pub devices: Vec<Input>,
     pub default: Option<String>,
+    /// The Mac's own microphone, if it has one (a MacBook's or iMac's, not a Mac Studio's).
+    pub built_in: Option<String>,
 }
 
 impl Inputs {
@@ -116,7 +123,7 @@ pub fn save_in(path: &std::path::Path, id: &str, inputs: &Inputs) -> anyhow::Res
 pub fn inputs() -> Inputs {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
-    let devices = host
+    let devices: Vec<Input> = host
         .input_devices()
         .map(|devices| {
             devices
@@ -132,7 +139,128 @@ pub fn inputs() -> Inputs {
         .default_input_device()
         .and_then(|device| device.id().ok())
         .map(|id| id.id().to_owned());
-    Inputs { devices, default }
+    #[cfg(target_os = "macos")]
+    let built_in = transport::built_in()
+        .into_iter()
+        .find(|id| devices.iter().any(|d| &d.id == id));
+    #[cfg(not(target_os = "macos"))]
+    let built_in = None;
+    Inputs {
+        devices,
+        default,
+        built_in,
+    }
+}
+
+/// The `microphones` entry for the macOS default input.
+pub const SYSTEM_DEFAULT: &str = "default";
+/// The most inputs a capture records from at once.
+pub const MOST_AT_ONCE: usize = 3;
+
+/// The saved order (`microphones`), if any.
+pub fn order() -> Option<Vec<Choice>> {
+    order_in(&crate::handoff::default_config_path())
+}
+
+pub fn order_in(path: &std::path::Path) -> Option<Vec<Choice>> {
+    crate::handoff::load_config_from(path)
+        .microphones
+        .map(|order| {
+            order
+                .into_iter()
+                .filter(|c| !c.id.trim().is_empty())
+                .collect()
+        })
+}
+
+/// The order Settings shows and a capture follows: the saved one, else the chosen input (or the
+/// macOS default) and then the built-in microphone.
+pub fn effective_order(
+    saved: Option<&[Choice]>,
+    choice: Option<&Choice>,
+    inputs: &Inputs,
+) -> Vec<Choice> {
+    if let Some(saved) = saved {
+        return saved.to_vec();
+    }
+    let first = choice.cloned().unwrap_or_else(|| Choice {
+        id: SYSTEM_DEFAULT.into(),
+        name: "System default".into(),
+    });
+    let built_in = inputs
+        .built_in
+        .as_deref()
+        .and_then(|id| inputs.find(id))
+        .filter(|input| input.id != first.id)
+        .map(|input| Choice {
+            id: input.id.clone(),
+            name: input.name.clone(),
+        });
+    std::iter::once(first).chain(built_in).collect()
+}
+
+/// What a capture records from (`backupMics`), first the one it prefers: `effective_order`'s
+/// inputs that are connected, each once (the default counts as the device it is), at most
+/// `MOST_AT_ONCE`. A chosen input that isn't connected gives way to the default, as `Pick` does.
+pub fn recording_order(
+    saved: Option<&[Choice]>,
+    choice: Option<&Choice>,
+    inputs: &Inputs,
+) -> Vec<Input> {
+    let mut order: Vec<Input> = Vec::new();
+    let mut wanted: Vec<&str> = Vec::new();
+    let effective = effective_order(saved, choice, inputs);
+    for entry in &effective {
+        wanted.push(&entry.id);
+    }
+    if saved.is_none() && choice.is_some_and(|c| inputs.find(&c.id).is_none()) {
+        wanted[0] = SYSTEM_DEFAULT;
+    }
+    for id in wanted {
+        let input = if id == SYSTEM_DEFAULT {
+            inputs.default_input()
+        } else {
+            inputs.find(id)
+        };
+        if let Some(input) = input
+            && !order.iter().any(|o| o.id == input.id)
+        {
+            order.push(input.clone());
+        }
+    }
+    order.truncate(MOST_AT_ONCE);
+    order
+}
+
+/// Saves the order from Settings (`ids`, first preferred): each named from what's connected, or as
+/// it was saved before when it isn't, and the default as "System default". Ids it can't name are
+/// left out.
+pub fn save_order_in(
+    path: &std::path::Path,
+    ids: &[String],
+    inputs: &Inputs,
+    before: &[Choice],
+) -> anyhow::Result<()> {
+    let mut order: Vec<Choice> = Vec::new();
+    for id in ids {
+        let name = if id == SYSTEM_DEFAULT {
+            Some("System default".to_owned())
+        } else {
+            inputs
+                .find(id)
+                .map(|input| input.name.clone())
+                .or_else(|| before.iter().find(|c| &c.id == id).map(|c| c.name.clone()))
+        };
+        if let Some(name) = name
+            && !order.iter().any(|c| &c.id == id)
+        {
+            order.push(Choice {
+                id: id.clone(),
+                name,
+            });
+        }
+    }
+    crate::handoff::set_config_value_in(path, "microphones", serde_json::to_value(order)?)
 }
 
 /// The cpal device for `id`, if connected.
@@ -288,6 +416,124 @@ mod watch {
     }
 }
 
+/// Which inputs are the Mac's own, by CoreAudio transport type (cpal doesn't say).
+#[cfg(target_os = "macos")]
+mod transport {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct Address {
+        selector: u32,
+        scope: u32,
+        element: u32,
+    }
+
+    #[link(name = "CoreAudio", kind = "framework")]
+    unsafe extern "C" {
+        fn AudioObjectGetPropertyDataSize(
+            object: u32,
+            address: *const Address,
+            qualifier_size: u32,
+            qualifier: *const c_void,
+            size: *mut u32,
+        ) -> i32;
+        fn AudioObjectGetPropertyData(
+            object: u32,
+            address: *const Address,
+            qualifier_size: u32,
+            qualifier: *const c_void,
+            size: *mut u32,
+            data: *mut c_void,
+        ) -> i32;
+    }
+
+    const SYSTEM_OBJECT: u32 = 1;
+    const SCOPE_GLOBAL: u32 = u32::from_be_bytes(*b"glob");
+    const DEVICES: u32 = u32::from_be_bytes(*b"dev#");
+    const TRANSPORT: u32 = u32::from_be_bytes(*b"tran");
+    const UID: u32 = u32::from_be_bytes(*b"uid ");
+    const BUILT_IN: u32 = u32::from_be_bytes(*b"bltn");
+
+    fn address(selector: u32) -> Address {
+        Address {
+            selector,
+            scope: SCOPE_GLOBAL,
+            element: 0,
+        }
+    }
+
+    /// The UIDs of every built-in audio device (its speakers too).
+    pub fn built_in() -> Vec<String> {
+        use core_foundation::base::TCFType;
+        use core_foundation::string::{CFString, CFStringRef};
+        let mut size = 0_u32;
+        // SAFETY: a valid address and out pointer.
+        if unsafe {
+            AudioObjectGetPropertyDataSize(
+                SYSTEM_OBJECT,
+                &address(DEVICES),
+                0,
+                std::ptr::null(),
+                &mut size,
+            )
+        } != 0
+        {
+            return Vec::new();
+        }
+        let mut ids = vec![0_u32; size as usize / 4];
+        // SAFETY: `ids` holds `size` bytes.
+        if unsafe {
+            AudioObjectGetPropertyData(
+                SYSTEM_OBJECT,
+                &address(DEVICES),
+                0,
+                std::ptr::null(),
+                &mut size,
+                ids.as_mut_ptr().cast(),
+            )
+        } != 0
+        {
+            return Vec::new();
+        }
+        ids.truncate(size as usize / 4);
+        ids.into_iter()
+            .filter(|&id| {
+                let mut transport = 0_u32;
+                let mut size = 4_u32;
+                // SAFETY: a u32 out value of 4 bytes.
+                let status = unsafe {
+                    AudioObjectGetPropertyData(
+                        id,
+                        &address(TRANSPORT),
+                        0,
+                        std::ptr::null(),
+                        &mut size,
+                        (&raw mut transport).cast(),
+                    )
+                };
+                status == 0 && transport == BUILT_IN
+            })
+            .filter_map(|id| {
+                let mut uid: CFStringRef = std::ptr::null();
+                let mut size = std::mem::size_of::<CFStringRef>() as u32;
+                // SAFETY: a CFStringRef out value, returned under the create rule.
+                let status = unsafe {
+                    AudioObjectGetPropertyData(
+                        id,
+                        &address(UID),
+                        0,
+                        std::ptr::null(),
+                        &mut size,
+                        (&raw mut uid).cast(),
+                    )
+                };
+                (status == 0 && !uid.is_null())
+                    .then(|| unsafe { CFString::wrap_under_create_rule(uid) }.to_string())
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,7 +552,90 @@ mod tests {
                 input("usb-1", "Shure MV7"),
             ],
             default: Some("BuiltInMicrophoneDevice".into()),
+            built_in: Some("BuiltInMicrophoneDevice".into()),
         }
+    }
+
+    fn ids(order: &[Input]) -> Vec<&str> {
+        order.iter().map(|i| i.id.as_str()).collect()
+    }
+
+    #[test]
+    fn backups_record_in_the_saved_order_or_else_the_choice_then_the_built_in_mic() {
+        let mut inputs = inputs();
+        let shure = Choice {
+            id: "usb-1".into(),
+            name: "Shure MV7".into(),
+        };
+        // Nothing saved: the default, which is the built-in mic, once.
+        assert_eq!(
+            ids(&recording_order(None, None, &inputs)),
+            ["BuiltInMicrophoneDevice"]
+        );
+        // A choice, then the built-in mic as its backup.
+        assert_eq!(
+            ids(&recording_order(None, Some(&shure), &inputs)),
+            ["usb-1", "BuiltInMicrophoneDevice"]
+        );
+        // AirPods chosen but gone (taken by the iPhone): the default stands in.
+        assert_eq!(
+            ids(&recording_order(None, Some(&airpods()), &inputs)),
+            ["BuiltInMicrophoneDevice"]
+        );
+        // AirPods back and the default: AirPods, then the built-in mic.
+        inputs.devices.push(input("airpods", "AirPods Pro"));
+        inputs.default = Some("airpods".into());
+        assert_eq!(
+            ids(&recording_order(None, None, &inputs)),
+            ["airpods", "BuiltInMicrophoneDevice"]
+        );
+        // A saved order: as saved, only what's connected, the default as the device it is.
+        let saved = [
+            Choice {
+                id: "gone".into(),
+                name: "Old mic".into(),
+            },
+            Choice {
+                id: SYSTEM_DEFAULT.into(),
+                name: "System default".into(),
+            },
+            shure.clone(),
+            Choice {
+                id: "airpods".into(),
+                name: "AirPods Pro".into(),
+            },
+        ];
+        assert_eq!(
+            ids(&recording_order(Some(&saved), None, &inputs)),
+            ["airpods", "usb-1"]
+        );
+        // No built-in mic (a Mac Studio): the choice alone.
+        inputs.built_in = None;
+        assert_eq!(
+            ids(&recording_order(None, Some(&shure), &inputs)),
+            ["usb-1"]
+        );
+    }
+
+    #[test]
+    fn the_order_saves_with_names_even_for_inputs_not_connected() {
+        let dir = std::env::temp_dir().join(format!(
+            "scrawl-mic-order-{}-{}",
+            std::process::id(),
+            crate::now_epoch_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let before = [airpods()];
+        let ids = ["airpods", "default", "usb-1", "nobody", "usb-1"].map(String::from);
+        save_order_in(&path, &ids, &inputs(), &before).unwrap();
+        let names: Vec<_> = order_in(&path)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(names, ["AirPods Pro", "System default", "Shure MV7"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn airpods() -> Choice {

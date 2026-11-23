@@ -76,6 +76,20 @@ struct SettingsMicrophone: Decodable, Equatable {
   var meter: String?
 }
 
+/// One input in the order captures record from (`backupMics`).
+struct SettingsMicRow: Decodable, Equatable {
+  var id: String
+  var title: String
+  var connected = true
+}
+
+/// The inputs a capture records from at once, first preferred; nil without `backupMics`.
+struct SettingsMicrophones: Decodable, Equatable {
+  var order: [SettingsMicRow] = []
+  /// What could be added.
+  var others: [SettingsMicRow] = []
+}
+
 struct SettingsTranscriber: Decodable, Equatable {
   var engine = "apple"
   var hexTitle = "Hex (not running)"
@@ -156,6 +170,7 @@ struct SettingsState: Decodable, Equatable {
     SettingsShortcut(kind: "paste", title: "Paste last capture", label: "⌥⇧V", key: "V", clearable: true),
   ]
   var microphone = SettingsMicrophone()
+  var microphones: SettingsMicrophones?
   var liveAudio = false
   var transcriber = SettingsTranscriber()
   var videoExport = false
@@ -606,6 +621,79 @@ struct SettingsCaption: View {
   }
 }
 
+/// The inputs captures record from, in order, as compact rows: a rank, the name, and buttons to
+/// move it up or down or stop recording from it; then a popup to add another.
+struct MicOrder: View {
+  @Environment(\.settingsTheme) private var theme
+  @ObservedObject var model: SettingsModel
+  let mics: SettingsMicrophones
+
+  private var ids: [String] { mics.order.map(\.id) }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      ForEach(Array(mics.order.enumerated()), id: \.element.id) { index, row in
+        if index > 0 { SettingsSeparator().padding(.leading, 40) }
+        HStack(spacing: 10) {
+          Text("\(index + 1)")
+            .font(.system(size: 12, weight: .semibold).monospacedDigit())
+            .foregroundStyle(index == 0 ? theme.text : theme.secondary)
+            .frame(width: 18, height: 18)
+            .background(Circle().fill(theme.control))
+          Text(row.title)
+            .font(.system(size: 14))
+            .foregroundStyle(row.connected ? theme.text : theme.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+          if !row.connected {
+            Text("not connected")
+              .font(.system(size: 12))
+              .foregroundStyle(theme.tertiary)
+          }
+          Spacer(minLength: 8)
+          icon("chevron.up", "Prefer \(row.title)", enabled: index > 0) { move(index, by: -1) }
+          icon("chevron.down", "Prefer the next one", enabled: index < mics.order.count - 1) { move(index, by: 1) }
+          icon("xmark", "Don't record from \(row.title)", enabled: mics.order.count > 1) {
+            model.set("microphones", ids.filter { $0 != row.id })
+          }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 36)
+      }
+      if !mics.others.isEmpty {
+        SettingsSeparator()
+        SettingsRow(title: "Also record from") {
+          SettingsPopup(value: "Add", options: mics.others.map { ($0.id, $0.title, true) }, selected: nil) {
+            model.set("microphones", ids + [$0])
+          }
+        }
+      }
+    }
+  }
+
+  private func move(_ index: Int, by step: Int) {
+    var order = ids
+    order.swapAt(index, index + step)
+    model.set("microphones", order)
+  }
+
+  private func icon(_ symbol: String, _ help: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+      Image(systemName: symbol)
+        .font(.system(size: 8, weight: .bold))
+        .foregroundStyle(theme.secondary)
+        .frame(width: 20, height: 20)
+        .background(Circle().fill(theme.control))
+        .contentShape(Circle())
+    }
+    .buttonStyle(.plain)
+    .opacity(enabled ? 1 : 0.3)
+    .disabled(!enabled)
+    .help(help)
+    .accessibilityLabel(help)
+  }
+}
+
 // MARK: Input level
 
 /// The level of the microphone recordings will use, only while the Recording pane is on screen
@@ -898,6 +986,10 @@ struct SettingsView: View {
       .frame(height: SettingsMetrics.titlebar)
       switch pane {
       case .general: general
+      case .recording where state.microphones != nil && !model.rendering:
+        // The order of microphones makes the pane taller than the window.
+        ScrollView(.vertical) { recording.padding(.bottom, SettingsMetrics.inset) }
+          .scrollIndicators(.automatic)
       case .recording: recording
       case .storage: storage
       case .permissions: permissions
@@ -952,9 +1044,13 @@ struct SettingsView: View {
     let mic = state.microphone
     return VStack(spacing: 0) {
       SettingsGroup {
-        SettingsRow(title: "Microphone") {
-          SettingsPopup(value: mic.value, options: mic.options.map { ($0.id, $0.title, $0.enabled) }, selected: mic.selected) {
-            model.set("microphone", $0)
+        if let mics = state.microphones {
+          MicOrder(model: model, mics: mics)
+        } else {
+          SettingsRow(title: "Microphone") {
+            SettingsPopup(value: mic.value, options: mic.options.map { ($0.id, $0.title, $0.enabled) }, selected: mic.selected) {
+              model.set("microphone", $0)
+            }
           }
         }
         if mic.meter != nil {
@@ -966,7 +1062,9 @@ struct SettingsView: View {
           SettingsSwitch(on: state.liveAudio) { model.set("liveAudio", $0) }
         }
       }
-      if let note = mic.note {
+      if state.microphones != nil {
+        SettingsCaption(text: "Each records at once. Every second comes from the first that hears you.")
+      } else if let note = mic.note {
         SettingsCaption(text: note)
           .transition(.opacity)
       }
@@ -1020,6 +1118,7 @@ struct SettingsView: View {
       SettingsCaption(text: "Adds Export Last Capture as Video… to the menu.")
     }
     .animation(SettingsMotion.state, value: mic)
+    .animation(SettingsMotion.state, value: state.microphones)
   }
 
   private var storage: some View {
@@ -1659,6 +1758,16 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
     )
     var micNotAllowed = base
     micNotAllowed.microphone.meter = nil
+    var micOrder = base
+    micOrder.microphones = SettingsMicrophones(
+      order: [
+        SettingsMicRow(id: "airpods", title: "AirPods Pro", connected: false),
+        SettingsMicRow(id: "BuiltInMicrophoneDevice", title: "MacBook Pro Microphone"),
+      ],
+      others: [SettingsMicRow(id: "default", title: "System default (MacBook Pro Microphone)"), SettingsMicRow(id: devices[1].id, title: "Shure MV7")]
+    )
+    var micOrderHex = hex
+    micOrderHex.microphones = micOrder.microphones
     var liveAudio = base
     liveAudio.liveAudio = true
     let samples: [(String, SettingsPane, SettingsState)] = [
@@ -1679,6 +1788,8 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate {
       ("recording-mic-chosen", .recording, micChosen),
       ("recording-mic-missing", .recording, micMissing),
       ("recording-mic-not-allowed", .recording, micNotAllowed),
+      ("recording-mic-order", .recording, micOrder),
+      ("recording-mic-order-hex", .recording, micOrderHex),
       ("recording-live-audio", .recording, liveAudio),
       ("recording-downloading", .recording, downloading),
       ("recording-ready", .recording, ready),

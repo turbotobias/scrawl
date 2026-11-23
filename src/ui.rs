@@ -3254,13 +3254,14 @@ impl ScrawlCoordinator {
                             }
                             let duration_ms =
                                 finalized.as_ref().map_or(0, |(_, b, _)| b.duration_ms);
-                            return (finalized, duration_ms, crate::audio::Sound::Heard);
+                            return (finalized, duration_ms, crate::audio::Sound::Heard, None);
                         }
                         CaptureSource::Lab => {
                             return (
                                 Err(anyhow::anyhow!("a lab recording has no bundle")),
                                 0,
                                 crate::audio::Sound::Heard,
+                                None,
                             );
                         }
                     };
@@ -3285,6 +3286,7 @@ impl ScrawlCoordinator {
                     let sound = recorded_audio
                         .as_ref()
                         .map_or(crate::audio::Sound::Nothing, |audio| audio.sound);
+                    let switched = recorded_audio.as_ref().and_then(|a| a.switched.clone());
                     let finalized = crate::finalize_capture_bundle(
                         &bundle_dir,
                         target,
@@ -3295,7 +3297,7 @@ impl ScrawlCoordinator {
                         None,
                         activity,
                     );
-                    (finalized, duration_ms, sound)
+                    (finalized, duration_ms, sound, switched)
                 })
                 .await;
 
@@ -3304,13 +3306,14 @@ impl ScrawlCoordinator {
             // when the server is down, so its outcome follows when it's ready.
             let routed = entity
                 .update(cx, |coord, cx| {
-                    let (finalized, duration_ms, sound) = result;
+                    let (finalized, duration_ms, sound, switched) = result;
                     let mut frame_count = 1;
                     let mut routed = None;
                     coord.completed_dir = None;
                     // Said where "Copied" goes, so a capture with a dead microphone is noticed
                     // now; a destination's "Sending to…" replaces it.
-                    if let Some(warning) = sound.warning() {
+                    // A backup microphone that stood in (`backupMics`) is said the same way.
+                    if let Some(warning) = sound.warning().or(switched) {
                         scrawl_log(format!("finish: {warning}"));
                         coord.completed_note = Some(format!("Copied · {warning}"));
                     }

@@ -60,6 +60,10 @@ Off by default (see Experiments in `AGENTS.md`). The record shortcut records the
 
 Off by default (see Experiments in `AGENTS.md`). A recorded window comes to the front as it starts, a banner names what's recorded, and covered parts of the chosen window are hatched (`docs/capture.md`). The bundle is unchanged: none of it is recorded.
 
+## Experiment `backupMics` (`mic::recording_order`, `audio::merge`)
+
+Off by default (see Experiments in `AGENTS.md`); macOS. A capture records from up to three inputs at once (`"microphones"` in priority order, else the chosen input or the default and then the built-in microphone, by CoreAudio transport type). Each backup is lined up with the first input by when its first samples came (`align`), and `merge` builds `audio.wav` a second at a time: from the first input that hears speech in it (at least three 50 ms windows 15 dB over that input's own quiet, its 20th-percentile level, and over -60 dBFS), else from the input before while it still has sound, with a 10 ms crossfade at each switch. An input that sent only digital silence, or nothing because it went away (AirPods taken by the iPhone), never hears speech, so the next stands in. When a backup stood in, the live transcription experiment's words (the first input's alone) are dropped and the recording is transcribed from the merged `audio.wav`, and the capsule says "Copied · used … from 0:42". The bundle holds only the merged track. The iPhone mirror's narration still uses one input.
+
 ## Experiment `clipboardImage` (`src/handoff.rs`, `src/win/clipboard.rs`)
 
 Off by default; Windows only. A finished capture (and `scrawl send` to the clipboard) normally copies `summary.md`'s text alone, so pressing Ctrl+V yourself drops the contact sheet; only the Paste chip and the paste shortcut paste the image first. With it on, `copy_bundle_to_clipboard` puts `contact-sheet.png` (`PNG` and `CF_DIBV5`) and the text on the clipboard together, so one Ctrl+V attaches the image and inserts the text in a browser or Electron composer (checked in the Claude desktop app) and pastes just the text in a terminal. If the contact sheet can't be read, the text is copied alone.
