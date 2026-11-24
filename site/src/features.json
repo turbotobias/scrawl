@@ -45,7 +45,7 @@
       "id": "remember-selection",
       "group": "start",
       "name": "Record what you chose last",
-      "says": "The shortcut records the window, area, screen or iPhone you chose last, while it's still there (if the window closed, its app's front window); hold the shortcut and tap Tab to choose another in the picker, and let go to record it. The chips light what's recorded and the menu names it.",
+      "says": "The shortcut records the window, area, screen or iPhone you chose last, while it's still there (if the window closed, its app's front window); click another window in the first 4 s to record it instead, or hold the shortcut and tap Tab to choose another in the picker, and let go to record it. The chips light what's recorded and the menu names it.",
       "status": "experiment:rememberSelection",
       "platforms": ["mac", "windows", "linux"],
       "added": "2026-11-11",

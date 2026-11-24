@@ -24,7 +24,7 @@ impl NativePill {
         [0; 2]
     }
 
-    pub fn announce(&self, _detail: &str, _rect: [f64; 4], _screen: bool) {}
+    pub fn announce(&self, _detail: &str, _rect: [f64; 4], _screen: bool, _seconds: Option<f64>) {}
 
     pub fn place_on(&self, _point: [f64; 2]) {}
 

@@ -38,6 +38,9 @@ use crate::sketch::timeline;
 #[cfg(target_os = "windows")]
 use crate::win::overlay::InkOverlay as LaserOverlay;
 
+/// For this long after the shortcut starts recording a remembered window, a click on another
+/// window records that one instead (`start_click`).
+const SWITCH_WINDOW_MS: u64 = 4_000;
 /// A modifier-less shortcut held this long is dropped, in case its key-up was missed.
 const HOLD_GIVE_UP: Duration = Duration::from_secs(30);
 const SIDEBAR_BG: u32 = 0x111111;
@@ -835,6 +838,9 @@ pub struct ScrawlCoordinator {
     hold_keys: bool,
     /// When the pending press went down.
     pressed_at: Option<Instant>,
+    /// The recording about to start is a remembered window, so a click on another window may
+    /// change it at first (`SWITCH_WINDOW_MS`).
+    switchable_start: bool,
     /// `scrawl lab pill`: recordings are pretend (`CaptureSource::Lab`), the picker takes no
     /// input and opens no overlay, and nothing looks for windows or phones.
     lab: bool,
@@ -918,6 +924,7 @@ impl ScrawlCoordinator {
             hold_mods: 0,
             hold_keys: false,
             pressed_at: None,
+            switchable_start: false,
             lab: false,
         }
     }
@@ -1287,6 +1294,55 @@ impl ScrawlCoordinator {
         }
     }
 
+    /// A click in the first seconds of a recording the shortcut started on a remembered window
+    /// (`SWITCH_WINDOW_MS`): on another window, that one is recorded instead (the recording starts
+    /// over on it); on the recorded one, the person is working there, so clicks stop switching.
+    pub fn start_click(&mut self, at: [f64; 2], cx: &mut Context<Self>) {
+        use std::sync::atomic::Ordering;
+        let Some(rec) = self.active_recording.as_ref() else {
+            return;
+        };
+        let (current, bundle) = (rec.target.window_id, rec.bundle_dir.clone());
+        let drawn = !self
+            .telemetry
+            .strokes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty();
+        if drawn || rec.target.mode != CaptureMode::Window {
+            self.telemetry.switch_until_ms.store(0, Ordering::Release);
+            return;
+        }
+        cx.spawn(async move |entity, cx| {
+            let windows = cx
+                .background_executor()
+                .spawn(async { list_selectable_windows() })
+                .await;
+            let hit = selectable_window_at(&windows, at[0], at[1]).cloned();
+            let _ = entity.update(cx, |coord, cx| {
+                if coord.active_recording.as_ref().map(|r| &r.bundle_dir) != Some(&bundle) {
+                    return;
+                }
+                match hit {
+                    Some(window) if window.window_id != current => {
+                        scrawl_log(format!(
+                            "clicked {} at the start: recording it instead",
+                            window.app.as_deref().unwrap_or("a window")
+                        ));
+                        coord.fold_reveal();
+                        if let Some((_, overlay)) = coord.discard_recording() {
+                            drop(overlay);
+                            coord.start_recording_with_target(window, cx);
+                        }
+                    }
+                    Some(_) => coord.telemetry.switch_until_ms.store(0, Ordering::Release),
+                    None => {}
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Tab, an arrow or Esc while the record shortcut is held (`capture::set_hold_hotkeys`).
     pub fn press_hold_key(&mut self, key: crate::shortcut::HoldKey, cx: &mut Context<Self>) {
         let action = self.shortcut.hold_key(key);
@@ -1435,7 +1491,10 @@ impl ScrawlCoordinator {
                 self.standing_in = last.as_ref().and_then(gone_note);
                 discover_target(None)
             }
-            Reuse::Window(window) => window,
+            Reuse::Window(window) => {
+                self.switchable_start = true;
+                window
+            }
             Reuse::Area([x, y, w, h]) => region_target(x, y, w, h, &windows),
             Reuse::Iphone => {
                 self.record_iphone_if_cabled(cx);
@@ -2858,6 +2917,8 @@ impl ScrawlCoordinator {
 
     pub fn start_recording_with_target(&mut self, target: TargetInfo, cx: &mut Context<Self>) {
         let standing_in = self.standing_in.take();
+        let switchable =
+            std::mem::take(&mut self.switchable_start) && target.mode == CaptureMode::Window;
         if self.is_recording() || self.is_processing() {
             return;
         }
@@ -2916,6 +2977,11 @@ impl ScrawlCoordinator {
 
         self.telemetry.set_capture_mode(target.mode);
         self.telemetry.reset_for_session(target.frame);
+        if switchable {
+            self.telemetry
+                .switch_until_ms
+                .store(SWITCH_WINDOW_MS, std::sync::atomic::Ordering::Release);
+        }
         let stage = Instant::now();
         // Reuse the continuous 120Hz Metal overlay opened in `begin_target_selection` so the
         // cutout and border never swap windows or jump a single pixel when recording starts.
@@ -2972,10 +3038,15 @@ impl ScrawlCoordinator {
         });
         // Name what's recorded on it, so a press never leaves a doubt which window it is.
         if show && let Some(ref pill) = self.native_pill {
+            let mut detail = recording_detail(&target, standing_in.as_deref());
+            if switchable {
+                detail.push_str(" · click another window to record it");
+            }
             pill.announce(
-                &recording_detail(&target, standing_in.as_deref()),
+                &detail,
                 target_rect,
                 target.mode == CaptureMode::Display,
+                switchable.then_some(SWITCH_WINDOW_MS as f64 / 1_000.0),
             );
         }
         self.active_recording = Some(ActiveRecording {
@@ -5900,6 +5971,7 @@ pub fn run_app(
                         loop_coord.update(cx, |coord, cx| match ev {
                             LiveOverlayEvent::CaptureShortcut => coord.press_shortcut(cx),
                             LiveOverlayEvent::HoldKey(key) => coord.press_hold_key(key, cx),
+                            LiveOverlayEvent::StartClick(at) => coord.start_click(at, cx),
                             LiveOverlayEvent::PasteLatestShortcut => {
                                 if !coord.is_recording() && !coord.is_selecting() {
                                     coord.paste_latest(cx);

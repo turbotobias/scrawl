@@ -41,11 +41,11 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::{CALayer, CATransaction};
 
 use self::atlas::{GlyphAtlas, IconKind};
-use self::place::Place;
 use self::model::{
     CAPTION_LINE, CAPTION_LINES, CAPTION_PX, CAPTION_W, CHIP_H, CHIP_PX, ElemId, FrameState,
     ISLAND_INSET, PANEL_H, PANEL_W, PillModel, Pres, WAVE_W,
 };
+use self::place::Place;
 use crate::ui::{SelectionMode, motion};
 
 const OFFSCREEN_W_PT: f32 = 960.0;
@@ -533,8 +533,9 @@ impl NativePill {
     }
 
     /// Names what a recording that's starting records ("Recording" and `detail`) for a moment at
-    /// the top of `rect` (global points; `screen`: a whole display, so below the capsule).
-    pub fn announce(&self, detail: &str, rect: [f64; 4], screen: bool) {
+    /// the top of `rect` (global points; `screen`: a whole display, so below the capsule), for
+    /// `seconds` (else `tip::BANNER_S`).
+    pub fn announce(&self, detail: &str, rect: [f64; 4], screen: bool, seconds: Option<f64>) {
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -549,7 +550,13 @@ impl NativePill {
                 screen,
                 visible,
             };
-            st.banner.show(mtm, "Recording", detail, place);
+            st.banner.show(
+                mtm,
+                "Recording",
+                detail,
+                place,
+                seconds.unwrap_or(tip::BANNER_S),
+            );
         }
     }
 
@@ -672,11 +679,7 @@ fn home_on(screens: &[crate::screens::Screen], point: Option<[f64; 2]>) -> Optio
         .and_then(|p| crate::screens::index_at(screens, p))
         .or(if screens.is_empty() { None } else { Some(0) })?;
     let screen = &screens[index];
-    let [x, y] = crate::screens::pill_origin(
-        screen,
-        f64::from(PANEL_W),
-        f64::from(model::PANEL_Y),
-    );
+    let [x, y] = crate::screens::pill_origin(screen, f64::from(PANEL_W), f64::from(model::PANEL_Y));
     Some(Place {
         visible: screen.visible.map(|v| v as f32),
         home: [x as f32, y as f32],
@@ -905,8 +908,7 @@ impl PillRuntimeState {
 
         let moving = self.drag.is_some_and(|d| d.moving);
         let inside_island = self.model.hit_island(local_x, local_y);
-        let should_ignore =
-            !inside_island && self.press_down_elem.is_none() && self.drag.is_none();
+        let should_ignore = !inside_island && self.press_down_elem.is_none() && self.drag.is_none();
         if self.ignores_mouse != should_ignore {
             self.ignores_mouse = should_ignore;
             self.window.setIgnoresMouseEvents(should_ignore);

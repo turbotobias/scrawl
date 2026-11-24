@@ -29,7 +29,7 @@ const FADE_OUT_S: f32 = 0.08;
 const GAP: f64 = 6.0;
 const MARGIN: f64 = 4.0;
 /// How long the banner shows, and how long it takes to go.
-const BANNER_S: f64 = 2.4;
+pub(super) const BANNER_S: f64 = 2.4;
 const BANNER_OUT_S: f32 = 0.35;
 /// The banner's distance from the top of what's recorded (a screen's leaves room for the
 /// capsule).
@@ -398,7 +398,15 @@ impl Banner {
         self.bubble.order_front();
     }
 
-    pub fn show(&mut self, mtm: MainThreadMarker, name: &str, detail: &str, place: Place) {
+    /// Shows `name` and `detail` over `place` for `seconds` before it fades.
+    pub fn show(
+        &mut self,
+        mtm: MainThreadMarker,
+        name: &str,
+        detail: &str,
+        place: Place,
+        seconds: f64,
+    ) {
         self.bubble.set_text(name, detail);
         let w = self.bubble.width();
         let h = self.bubble.style.height;
@@ -417,7 +425,7 @@ impl Banner {
         ];
         self.bubble.place(mtm, at);
         self.bubble.order_front();
-        self.until = self.clock.elapsed().as_secs_f64() + BANNER_S;
+        self.until = self.clock.elapsed().as_secs_f64() + seconds;
     }
 
     pub fn hide(&mut self) {

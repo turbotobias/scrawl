@@ -1735,6 +1735,9 @@ fn mouse_event(
         // A ⇧-press is never a click: a ⇧-click drops a pin, a ⇧-drag is ink (the poller's).
         EVENT_LEFT_MOUSE_DOWN | EVENT_RIGHT_MOUSE_DOWN if !on_scrawl(loc.x, loc.y) => {
             if !pure_shift {
+                if event_type == EVENT_LEFT_MOUSE_DOWN {
+                    telemetry.start_click(t_ms, loc.x, loc.y);
+                }
                 telemetry.pointer_down(t_ms, loc.x, loc.y);
             } else if event_type == EVENT_LEFT_MOUSE_DOWN {
                 telemetry.shift_down(t_ms, loc.x, loc.y);
