@@ -38,9 +38,34 @@ use crate::sketch::timeline;
 #[cfg(target_os = "windows")]
 use crate::win::overlay::InkOverlay as LaserOverlay;
 
-/// For this long after the shortcut starts recording a remembered window, a click on another
-/// window records that one instead (`start_click`).
-const SWITCH_WINDOW_MS: u64 = 4_000;
+/// For this long after the shortcut starts recording a remembered window, whatever window comes to
+/// the front is recorded instead (`tick_follow`).
+const FOLLOW_FOR: Duration = Duration::from_secs(5);
+/// How often the front window is looked at then, starting this long after the start, once the
+/// remembered window has been brought forward.
+const FOLLOW_EVERY: Duration = Duration::from_millis(150);
+const FOLLOW_AFTER: Duration = Duration::from_millis(400);
+
+/// Following focus at the start of a recording (`tick_follow`).
+struct Follow {
+    until: Instant,
+    next: Instant,
+    /// The front window last seen; only a change of it counts.
+    seen: Option<u32>,
+    /// The recording it follows (a switch moves it to the new one).
+    bundle: PathBuf,
+    /// The window list is being read for a switch.
+    switching: bool,
+}
+
+/// The window to record instead, given the front window now: only when the front window changed
+/// since it was last seen and isn't the recorded one. So the remembered window being brought
+/// forward, or what was already in front when following began, never switches it.
+fn follow_front(seen: &mut Option<u32>, front: Option<u32>, recorded: Option<u32>) -> Option<u32> {
+    let front = front?;
+    let before = seen.replace(front);
+    (before.is_some_and(|b| b != front) && Some(front) != recorded).then_some(front)
+}
 /// A modifier-less shortcut held this long is dropped, in case its key-up was missed.
 const HOLD_GIVE_UP: Duration = Duration::from_secs(30);
 const SIDEBAR_BG: u32 = 0x111111;
@@ -838,9 +863,10 @@ pub struct ScrawlCoordinator {
     hold_keys: bool,
     /// When the pending press went down.
     pressed_at: Option<Instant>,
-    /// The recording about to start is a remembered window, so a click on another window may
-    /// change it at first (`SWITCH_WINDOW_MS`).
+    /// The recording about to start is a remembered window, so the window brought to the front
+    /// at first is recorded instead (`FOLLOW_FOR`).
     switchable_start: bool,
+    follow: Option<Follow>,
     /// `scrawl lab pill`: recordings are pretend (`CaptureSource::Lab`), the picker takes no
     /// input and opens no overlay, and nothing looks for windows or phones.
     lab: bool,
@@ -925,6 +951,7 @@ impl ScrawlCoordinator {
             hold_keys: false,
             pressed_at: None,
             switchable_start: false,
+            follow: None,
             lab: false,
         }
     }
@@ -1294,49 +1321,70 @@ impl ScrawlCoordinator {
         }
     }
 
-    /// A click in the first seconds of a recording the shortcut started on a remembered window
-    /// (`SWITCH_WINDOW_MS`): on another window, that one is recorded instead (the recording starts
-    /// over on it); on the recorded one, the person is working there, so clicks stop switching.
-    pub fn start_click(&mut self, at: [f64; 2], cx: &mut Context<Self>) {
-        use std::sync::atomic::Ordering;
-        let Some(rec) = self.active_recording.as_ref() else {
+    /// Polled from the UI loop while `follow` is on: when another window comes to the front (⌘Tab,
+    /// a click, Mission Control), the recording starts over on it (`follow_front`).
+    pub fn tick_follow(&mut self, cx: &mut Context<Self>) {
+        let Some(follow) = self.follow.as_mut() else {
             return;
         };
-        let (current, bundle) = (rec.target.window_id, rec.bundle_dir.clone());
+        let now = Instant::now();
+        let same = self
+            .active_recording
+            .as_ref()
+            .filter(|r| r.bundle_dir == follow.bundle);
         let drawn = !self
             .telemetry
             .strokes
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty();
-        if drawn || rec.target.mode != CaptureMode::Window {
-            self.telemetry.switch_until_ms.store(0, Ordering::Release);
+        let Some(rec) = same.filter(|_| now < follow.until && !drawn) else {
+            self.follow = None;
+            return;
+        };
+        if follow.switching || now < follow.next {
             return;
         }
+        follow.next = now + FOLLOW_EVERY;
+        let recorded = rec.target.window_id;
+        let Some(front) = follow_front(
+            &mut follow.seen,
+            crate::capture::front_window_id(),
+            recorded,
+        ) else {
+            return;
+        };
+        follow.switching = true;
+        let bundle = follow.bundle.clone();
         cx.spawn(async move |entity, cx| {
             let windows = cx
                 .background_executor()
                 .spawn(async { list_selectable_windows() })
                 .await;
-            let hit = selectable_window_at(&windows, at[0], at[1]).cloned();
+            let target = windows.into_iter().find(|w| w.window_id == Some(front));
             let _ = entity.update(cx, |coord, cx| {
-                if coord.active_recording.as_ref().map(|r| &r.bundle_dir) != Some(&bundle) {
+                let Some(follow) = coord.follow.as_mut().filter(|f| f.bundle == bundle) else {
                     return;
-                }
-                match hit {
-                    Some(window) if window.window_id != current => {
-                        scrawl_log(format!(
-                            "clicked {} at the start: recording it instead",
-                            window.app.as_deref().unwrap_or("a window")
-                        ));
-                        coord.fold_reveal();
-                        if let Some((_, overlay)) = coord.discard_recording() {
-                            drop(overlay);
-                            coord.start_recording_with_target(window, cx);
-                        }
-                    }
-                    Some(_) => coord.telemetry.switch_until_ms.store(0, Ordering::Release),
-                    None => {}
+                };
+                follow.switching = false;
+                let Some(target) = target else {
+                    return;
+                };
+                scrawl_log(format!(
+                    "{} came to the front at the start: recording it instead",
+                    target.app.as_deref().unwrap_or("a window")
+                ));
+                coord.fold_reveal();
+                let Some((_, overlay)) = coord.discard_recording() else {
+                    return;
+                };
+                drop(overlay);
+                coord.start_recording_with_target(target, cx);
+                // Still following, now this recording.
+                if let (Some(follow), Some(rec)) =
+                    (coord.follow.as_mut(), coord.active_recording.as_ref())
+                {
+                    follow.bundle = rec.bundle_dir.clone();
                 }
             });
         })
@@ -2977,11 +3025,7 @@ impl ScrawlCoordinator {
 
         self.telemetry.set_capture_mode(target.mode);
         self.telemetry.reset_for_session(target.frame);
-        if switchable {
-            self.telemetry
-                .switch_until_ms
-                .store(SWITCH_WINDOW_MS, std::sync::atomic::Ordering::Release);
-        }
+
         let stage = Instant::now();
         // Reuse the continuous 120Hz Metal overlay opened in `begin_target_selection` so the
         // cutout and border never swap windows or jump a single pixel when recording starts.
@@ -3040,13 +3084,13 @@ impl ScrawlCoordinator {
         if show && let Some(ref pill) = self.native_pill {
             let mut detail = recording_detail(&target, standing_in.as_deref());
             if switchable {
-                detail.push_str(" · click another window to record it");
+                detail.push_str(" · switch windows to record another");
             }
             pill.announce(
                 &detail,
                 target_rect,
                 target.mode == CaptureMode::Display,
-                switchable.then_some(SWITCH_WINDOW_MS as f64 / 1_000.0),
+                switchable.then_some(FOLLOW_FOR.as_secs_f64()),
             );
         }
         self.active_recording = Some(ActiveRecording {
@@ -3060,6 +3104,16 @@ impl ScrawlCoordinator {
             },
             _metal_overlay: metal_overlay,
         });
+        if switchable && let Some(rec) = &self.active_recording {
+            let now = Instant::now();
+            self.follow = Some(Follow {
+                until: now + FOLLOW_FOR,
+                next: now + FOLLOW_AFTER,
+                seen: None,
+                bundle: rec.bundle_dir.clone(),
+                switching: false,
+            });
+        }
         self.present_recording_island(cx);
         start_metric("recording_start_ms", started);
     }
@@ -5971,7 +6025,6 @@ pub fn run_app(
                         loop_coord.update(cx, |coord, cx| match ev {
                             LiveOverlayEvent::CaptureShortcut => coord.press_shortcut(cx),
                             LiveOverlayEvent::HoldKey(key) => coord.press_hold_key(key, cx),
-                            LiveOverlayEvent::StartClick(at) => coord.start_click(at, cx),
                             LiveOverlayEvent::PasteLatestShortcut => {
                                 if !coord.is_recording() && !coord.is_selecting() {
                                     coord.paste_latest(cx);
@@ -6026,6 +6079,9 @@ pub fn run_app(
                         // key tap sees Esc anyway.
                         loop_coord.update(cx, |coord, cx| coord.cancel_recording(cx));
                     }
+                    if loop_coord.read(cx).follow.is_some() {
+                        loop_coord.update(cx, |coord, cx| coord.tick_follow(cx));
+                    }
                     if loop_coord.read(cx).gate.is_pending() {
                         loop_coord.update(cx, |coord, _| coord.tick_gate());
                     }
@@ -6047,6 +6103,23 @@ pub fn run_app(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn following_the_front_window_at_the_start_switches_only_on_a_change() {
+        let (a, b, t) = (Some(1), Some(2), Some(3));
+        let mut seen = None;
+        // The terminal was in front, then the remembered window A is brought forward: no switch.
+        assert_eq!(follow_front(&mut seen, t, a), None);
+        assert_eq!(follow_front(&mut seen, a, a), None);
+        assert_eq!(follow_front(&mut seen, a, a), None);
+        // ⌘Tab to B: record B.
+        assert_eq!(follow_front(&mut seen, b, a), Some(2));
+        // Back to A while B records: A again.
+        assert_eq!(follow_front(&mut seen, a, b), Some(1));
+        // Nothing readable in front changes nothing.
+        assert_eq!(follow_front(&mut seen, None, a), None);
+        assert_eq!(follow_front(&mut seen, a, a), None);
+    }
 
     #[test]
     fn the_start_banner_names_the_window_area_or_screen() {

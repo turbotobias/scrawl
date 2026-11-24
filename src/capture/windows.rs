@@ -272,6 +272,11 @@ fn external_front_window() -> Option<win::WindowInfo> {
 }
 
 /// The frontmost app's pid, or the last external one while Scrawl itself is in front.
+/// Following focus at the start of a recording is macOS only.
+pub fn front_window_id() -> Option<u32> {
+    None
+}
+
 pub fn frontmost_external_pid() -> Option<i32> {
     external_front_window().map(|w| w.pid as i32)
 }

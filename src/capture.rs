@@ -125,9 +125,6 @@ pub enum LiveOverlayEvent {
     CaptureShortcut,
     /// Tab, an arrow or Esc while the record shortcut is held (`set_hold_hotkeys`).
     HoldKey(crate::shortcut::HoldKey),
-    /// A click (global point) while a click may still change which window is recorded
-    /// (`switch_until_ms`).
-    StartClick([f64; 2]),
     PasteLatestShortcut,
     UndoStroke,
     /// A shape tool to draw with (`None`: the pen), from a tool shortcut while recording.
@@ -854,9 +851,6 @@ pub struct SharedCaptureTelemetry {
     /// poller records clicks from polled button state.
     mouse_live: AtomicBool,
     last_shortcut_ms: AtomicU64,
-    /// Until this many ms into the recording a click on another window records that one instead
-    /// (`ui::start_click`); 0 when it can't.
-    pub(crate) switch_until_ms: AtomicU64,
     /// Carbon saw the record shortcut's key come up since it last went down (true at rest).
     pub(crate) record_key_up: AtomicBool,
     /// The key-state poll saw that key down during this press (`record_key_held`).
@@ -916,7 +910,6 @@ impl SharedCaptureTelemetry {
             start_glow: AtomicBool::new(false),
             mouse_live: AtomicBool::new(false),
             last_shortcut_ms: AtomicU64::new(0),
-            switch_until_ms: AtomicU64::new(0),
             record_key_up: AtomicBool::new(true),
             record_key_seen_down: AtomicBool::new(false),
             drag_start: Mutex::new(None),
@@ -961,17 +954,6 @@ impl SharedCaptureTelemetry {
             tool
         };
         let _ = self.ui_sender.try_send(LiveOverlayEvent::Tool(next));
-    }
-
-    /// A click at `t_ms` into the recording: while a click may still change which window is
-    /// recorded, the UI hears of it (`LiveOverlayEvent::StartClick`).
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub fn start_click(&self, t_ms: u64, x: f64, y: f64) {
-        if t_ms < self.switch_until_ms.load(Ordering::Acquire) {
-            let _ = self
-                .ui_sender
-                .try_send(LiveOverlayEvent::StartClick([x, y]));
-        }
     }
 
     /// A key taken while the record shortcut is held (`set_hold_hotkeys`).
@@ -1105,7 +1087,6 @@ impl SharedCaptureTelemetry {
 
     pub fn reset_for_session(&self, frame: TargetFrame) {
         self.selecting.store(false, Ordering::Release);
-        self.switch_until_ms.store(0, Ordering::Release);
         self.set_tool(None);
         *self
             .picker_rect
@@ -2120,36 +2101,6 @@ mod tests {
             scale: 2.0,
         });
         telemetry
-    }
-
-    #[test]
-    fn a_click_can_change_the_window_only_at_the_start_of_a_switchable_recording() {
-        let (sender, receiver) = flume::unbounded();
-        let telemetry = SharedCaptureTelemetry::new(sender);
-        let frame = TargetFrame {
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 100.0,
-            scale: 2.0,
-        };
-        telemetry.reset_for_session(frame);
-        telemetry.start_click(100, 5.0, 6.0);
-        assert!(receiver.try_recv().is_err(), "not a switchable start");
-        telemetry.switch_until_ms.store(4_000, Ordering::Release);
-        telemetry.start_click(3_999, 5.0, 6.0);
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(LiveOverlayEvent::StartClick([5.0, 6.0]))
-        ));
-        telemetry.start_click(4_000, 5.0, 6.0);
-        assert!(receiver.try_recv().is_err(), "too late");
-        telemetry.reset_for_session(frame);
-        telemetry.start_click(10, 5.0, 6.0);
-        assert!(
-            receiver.try_recv().is_err(),
-            "a new recording starts without it"
-        );
     }
 
     #[test]

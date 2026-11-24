@@ -233,8 +233,8 @@ Preview every pane, dark and light, with the recorder listening and a combinatio
 - **Record what you chose last** (experiment `rememberSelection`): the press records the window,
   area, screen or iPhone you last chose instead of the screen under the pointer, as long as it's
   still there (a closed window gives way to its app's front window; otherwise it records the
-  screen and keeps your choice). For the first 4 seconds of a remembered window, **click another
-  window** to record that one instead. To choose anything else, **hold the shortcut and tap `Tab`** (or `→`;
+  screen and keeps your choice). For the first 5 seconds of a remembered window, **switch to
+  another window** (`⌘Tab`, a click, Mission Control) to record that one instead. To choose anything else, **hold the shortcut and tap `Tab`** (or `→`;
   `⇧Tab` or `←` go back): the picker steps through Area, Window, Screen and iPhone, and letting
   go records what's lit (for Window, the window under the pointer; for Area, drag one). `Esc`
   while holding cancels. Scrawl takes those keys only while the shortcut is held. The chips light what it's recording, and the menu's

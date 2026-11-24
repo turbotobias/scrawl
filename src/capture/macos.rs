@@ -1240,6 +1240,13 @@ pub fn frontmost_external_pid() -> Option<i32> {
     (fallback > 0 && fallback != our_pid).then_some(fallback)
 }
 
+/// The window in front: the frontmost app's topmost normal window, from the window server.
+pub fn front_window_id() -> Option<u32> {
+    let pid = frontmost_external_pid()?;
+    let raw = objc2::rc::autoreleasepool(|_| crate::windows::raw_windows());
+    crate::windows::frontmost_window_of(&raw, pid, [-1e9, -1e9, 2e9, 2e9]).map(|w| w.id)
+}
+
 pub fn frontmost_app_info() -> Option<(i32, String, Option<String>)> {
     use objc2_app_kit::{NSRunningApplication, NSWorkspace};
     let our_pid = std::process::id() as i32;
@@ -1735,9 +1742,6 @@ fn mouse_event(
         // A ⇧-press is never a click: a ⇧-click drops a pin, a ⇧-drag is ink (the poller's).
         EVENT_LEFT_MOUSE_DOWN | EVENT_RIGHT_MOUSE_DOWN if !on_scrawl(loc.x, loc.y) => {
             if !pure_shift {
-                if event_type == EVENT_LEFT_MOUSE_DOWN {
-                    telemetry.start_click(t_ms, loc.x, loc.y);
-                }
                 telemetry.pointer_down(t_ms, loc.x, loc.y);
             } else if event_type == EVENT_LEFT_MOUSE_DOWN {
                 telemetry.shift_down(t_ms, loc.x, loc.y);
