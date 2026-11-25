@@ -2,7 +2,7 @@
 
 <img src="site/public/app-icon.png" width="96" alt="Scrawl">
 
-# Scrawl, turbotobias edition
+# Scrawl
 
 **Show an agent a problem instead of describing it.**
 
