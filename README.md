@@ -1,3 +1,91 @@
+<div align="center">
+
+<img src="site/public/app-icon.png" width="96" alt="Scrawl">
+
+# Scrawl, turbotobias edition
+
+**Show an agent a problem instead of describing it.**
+
+A fork of [**kitlangton/scrawl**](https://github.com/kitlangton/scrawl) by [Kit Langton](https://github.com/kitlangton).<br>
+Scrawl is his; this fork adds a few things on top.
+
+[**See how Scrawl works → scrawl.kitlangton.com**](https://scrawl.kitlangton.com)
+
+</div>
+
+## What this fork adds
+
+<table>
+  <tr>
+    <th width="50%">Original</th>
+    <th width="50%">This fork</th>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Hear yourself.</b> The capsule shows your voice and words as you talk, so a dead mic is obvious.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/fork/capsule-original.png" alt="Original capsule while recording: timer and modes only"></td>
+    <td><img src="docs/fork/capsule-fork.png" alt="Fork capsule while recording: a live waveform and the words being said"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Backup microphones.</b> Record from several at once; each second comes from the first that hears you.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/fork/mics-original.png" alt="Original Settings: one microphone"></td>
+    <td><img src="docs/fork/mics-fork.png" alt="Fork Settings: microphones in priority order"></td>
+  </tr>
+  <tr>
+    <td colspan="2"><b>Lines, arrows and boxes.</b> Pick a shape (<code>⌥⇧1–4</code>), hold <code>⇧</code> and drag.</td>
+  </tr>
+  <tr>
+    <td><img src="docs/fork/shapes-original.png" alt="Original: a hand-drawn circle and arrow"></td>
+    <td><img src="docs/fork/shapes-fork.png" alt="Fork: a clean box and arrow"></td>
+  </tr>
+</table>
+
+**And:**
+
+- **Hold the shortcut, tap `Tab`** to pick Screen, Window, Area or iPhone. Let go to record.
+- **Records what you chose last**, so one press does it again.
+- **Switch windows in the first 5 s** and it records the one you brought forward.
+- **Warns when the mic heard nothing.**
+- **Drag the capsule** out of the way. It stays there.
+- **Buttons show their keys** on hover.
+- **The window picker** highlights the window that's really on top.
+
+## Try it
+
+Build and install from source (Rust and Xcode):
+
+```sh
+git clone https://github.com/turbotobias/scrawl && cd scrawl
+./scripts/install-app.sh
+```
+
+Then turn the new parts on in `~/.config/scrawl/config.json`:
+
+```json
+{
+  "liveAudio": true,
+  "experiments": {
+    "rememberSelection": true,
+    "showTarget": true,
+    "shapeTools": true,
+    "backupMics": true
+  }
+}
+```
+
+<br>
+
+---
+
+<a id="original-readme"></a>
+
+> **The original README** from [kitlangton/scrawl](https://github.com/kitlangton/scrawl) follows, with this fork's features noted where they fit.
+
+<br>
+
 # Scrawl
 
 Show an agent a problem instead of describing it.

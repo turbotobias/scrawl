@@ -42,3 +42,6 @@ impl NativePill {
         false
     }
 }
+
+/// For the motion lab: the capsule starts at home (nothing is saved here).
+pub fn stay_home() {}

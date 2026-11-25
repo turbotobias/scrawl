@@ -11,6 +11,11 @@
 pub mod atlas;
 pub mod model;
 mod place;
+
+/// For the motion lab: the capsule starts at home, not where a drag left it.
+pub fn stay_home() {
+    place::IGNORE_SAVED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
 mod tip;
 mod types;
 

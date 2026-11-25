@@ -39,7 +39,11 @@ impl Place {
     pub fn inside(&self, origin: [f32; 2], capsule: &Layout) -> [f32; 2] {
         let [vx, vy, vw, vh] = self.visible;
         let fit = |o: f32, lo: f32, hi: f32| {
-            if lo > hi { (lo + hi) * 0.5 } else { o.clamp(lo, hi) }
+            if lo > hi {
+                (lo + hi) * 0.5
+            } else {
+                o.clamp(lo, hi)
+            }
         };
         [
             fit(
@@ -76,8 +80,14 @@ fn saved_path() -> Option<PathBuf> {
         .map(|dir| dir.join("capsule-offset"))
 }
 
+/// Set by the motion lab, whose capsule always starts at home.
+pub static IGNORE_SAVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The offset a drag left last time Scrawl ran, else none.
 pub fn saved_offset() -> [f32; 2] {
+    if IGNORE_SAVED.load(std::sync::atomic::Ordering::Relaxed) {
+        return [0.0, 0.0];
+    }
     saved_path()
         .and_then(|path| std::fs::read_to_string(path).ok())
         .and_then(|text| parse(&text))
@@ -148,7 +158,11 @@ mod tests {
         let mut p = place();
         // Dragged far past the bottom-right corner.
         p.drop_at([5000.0, 5000.0]);
-        for c in [capsule(120.0, 40.0), capsule(560.0, 40.0), capsule(380.0, 80.0)] {
+        for c in [
+            capsule(120.0, 40.0),
+            capsule(560.0, 40.0),
+            capsule(380.0, 80.0),
+        ] {
             let [x, y] = p.origin(&c);
             assert!((x + c.r - (1512.0 - MARGIN)).abs() < 0.01, "{c:?}");
             assert!((y + c.b - (982.0 - MARGIN)).abs() < 0.01, "{c:?}");

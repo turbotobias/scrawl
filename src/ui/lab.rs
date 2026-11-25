@@ -24,6 +24,18 @@ const TAIL_S: f32 = 0.75;
 /// The capsule window is 520 × 84 at y = 34, under the menu bar.
 pub const BACKDROP: [f32; 4] = [0.0, 38.0, 640.0, 76.0];
 
+/// The backdrop's width and height, `SCRAWL_LAB_BACKDROP_SIZE=w,h` for a taller capsule (stills of
+/// live audio).
+fn backdrop_size() -> [f32; 2] {
+    std::env::var("SCRAWL_LAB_BACKDROP_SIZE")
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once(',')?;
+            Some([w.trim().parse().ok()?, h.trim().parse().ok()?])
+        })
+        .unwrap_or([BACKDROP[2], BACKDROP[3]])
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Scene {
     /// Tap: recording + chips, then the Area chip turns it into the picker.
@@ -40,6 +52,8 @@ pub enum Scene {
     Cancel,
     /// Open the picker, then dismiss it.
     Dismiss,
+    /// Tap, then hold the recording for 4 s, for stills of the recording capsule.
+    Record,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -63,6 +77,7 @@ impl Scene {
             Self::Finish => "finish",
             Self::Cancel => "cancel",
             Self::Dismiss => "dismiss",
+            Self::Record => "record",
         }
     }
 
@@ -104,6 +119,7 @@ impl Scene {
             ],
             Self::Cancel => vec![(0.0, Step::Tap), (1.2, Step::Cancel)],
             Self::Dismiss => vec![(0.0, Step::Open), (1.2, Step::Dismiss)],
+            Self::Record => vec![(0.0, Step::Tap), (4.0, Step::Cancel)],
         }
     }
 }
@@ -138,13 +154,93 @@ pub(super) fn target() -> TargetInfo {
 fn apply(step: Step, coord: &mut ScrawlCoordinator, cx: &mut gpui::Context<ScrawlCoordinator>) {
     motion::trace_event(format!("lab:{step:?}"));
     match step {
-        Step::Tap => coord.record_screen_now(cx),
+        Step::Tap => {
+            coord.record_screen_now(cx);
+            voice::start();
+        }
         Step::Chip(mode) => coord.switch_recording(mode, cx),
         Step::Open => coord.open_picker(Some(SelectionMode::Screen), cx),
         Step::Click(mode) => coord.click_selection_mode(mode, cx),
-        Step::Cancel => coord.cancel_recording(cx),
-        Step::Finish => coord.finish_recording(cx),
+        Step::Cancel => {
+            voice::stop();
+            coord.cancel_recording(cx);
+        }
+        Step::Finish => {
+            voice::stop();
+            coord.finish_recording(cx);
+        }
         Step::Dismiss => coord.dismiss_island(cx),
+    }
+}
+
+/// A pretend voice for the pretend recording, so the capsule shows live audio (when `liveAudio`
+/// is on): speech-like noise at 16 kHz in syllables and words, and the words it "says".
+mod voice {
+    use std::sync::{Arc, Mutex, PoisonError, atomic::AtomicBool, atomic::Ordering};
+    use std::time::{Duration, Instant};
+
+    use crate::live_audio::{self, Caption};
+
+    const WORDS: &str = "the pay button runs off the page when the window is narrow";
+    static CURRENT: Mutex<Option<(u64, Arc<AtomicBool>)>> = Mutex::new(None);
+
+    pub fn start() {
+        stop();
+        if !live_audio::wanted() {
+            return;
+        }
+        let samples = Arc::new(Mutex::new(Vec::<f32>::new()));
+        let caption = Arc::new(Mutex::new(Caption::default()));
+        let id = live_audio::begin(Arc::clone(&samples), Some(Arc::clone(&caption)));
+        let done = Arc::new(AtomicBool::new(false));
+        *CURRENT.lock().unwrap_or_else(PoisonError::into_inner) = Some((id, Arc::clone(&done)));
+        std::thread::spawn(move || {
+            let rate = 16_000.0_f32;
+            let began = Instant::now();
+            let mut written = 0usize;
+            let mut seed = 0x9e37_79b9_u32;
+            let words: Vec<&str> = WORDS.split(' ').collect();
+            let mut said = 0;
+            while !done.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(20));
+                let s = began.elapsed().as_secs_f32();
+                let want = (s * rate) as usize;
+                let mut chunk = Vec::with_capacity(want.saturating_sub(written));
+                for i in written..want {
+                    let t = i as f32 / rate;
+                    // Words of about 0.35 s with short gaps, syllables at ~5 Hz inside them.
+                    let word = (t / 0.42).fract();
+                    let on = if word < 0.82 { 1.0 } else { 0.06 };
+                    let syllable = 0.55 + 0.45 * (t * 31.0).sin().abs();
+                    let swell = 0.7 + 0.3 * (t * 2.3).sin();
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    let noise = (seed >> 8) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0;
+                    chunk.push(noise * 0.22 * on * syllable * swell);
+                }
+                written = want;
+                samples
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .extend(chunk);
+                let due = ((s - 0.15) / 0.42).max(0.0) as usize;
+                if due > said && said < words.len() {
+                    said = due.min(words.len());
+                    let mut caption = caption.lock().unwrap_or_else(PoisonError::into_inner);
+                    caption.volatile(&words[..said].join(" "));
+                }
+            }
+        });
+    }
+
+    pub fn stop() {
+        if let Some((id, done)) = CURRENT
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            done.store(true, Ordering::Relaxed);
+            live_audio::end(id);
+        }
     }
 }
 
@@ -169,6 +265,7 @@ pub fn run(options: Options) {
             [f32::from(b.size.width), f32::from(b.size.height)]
         });
         motion::trace_open(&format!("pill.{}", options.scene.name()), display);
+        crate::native::pill::stay_home();
         if options.backdrop {
             open_backdrop(display, cx);
         }
@@ -176,10 +273,10 @@ pub fn run(options: Options) {
         // For screen recordings (`perf/pill/record.sh`): the backdrop's rect in screen points.
         println!(
             "region {},{},{},{}",
-            ((display[0] - BACKDROP[2]) * 0.5).round(),
+            ((display[0] - backdrop_size()[0]) * 0.5).round(),
             BACKDROP[1],
-            BACKDROP[2],
-            BACKDROP[3]
+            backdrop_size()[0],
+            backdrop_size()[1]
         );
 
         // The app's frame loop, minus everything that isn't the capsule.
@@ -448,8 +545,7 @@ fn open_backdrop(display: [f32; 2], cx: &mut App) {
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
-    let w = BACKDROP[2];
-    let h = BACKDROP[3];
+    let [w, h] = backdrop_size();
     let bounds = Bounds {
         origin: point(px((display[0] - w) * 0.5), px(BACKDROP[1])),
         size: size(px(w), px(h)),

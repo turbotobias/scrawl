@@ -70,7 +70,7 @@ use crate::capture::{ScreenCaptureSession, discover_target, write_bundle_artifac
 use crate::keyframes::select_keyframes;
 use crate::model::{
     CaptureMode, DeviceInfo, InteractionEvent, Mark, RgbaFrame, SCALE, ScrawlBundle, Shape, Stroke,
-    TargetFrame, TargetInfo, TranscriptData, TranscriptSegment, WordTiming, keyframe_budget,
+    TargetFrame, TargetInfo, Tool, TranscriptData, TranscriptSegment, WordTiming, keyframe_budget,
     parse_clock_ms,
 };
 use crate::render::render_synthetic_demo_frame;
@@ -240,6 +240,9 @@ enum Command {
         /// Copy the generated bundle to the macOS clipboard.
         #[arg(long)]
         clipboard: bool,
+        /// Draw the box and arrow with the shape tools instead of by hand (README stills).
+        #[arg(long, hide = true)]
+        shapes: bool,
     },
     /// Record a live screen + microphone capture from the terminal for a fixed duration.
     Record {
@@ -1405,6 +1408,15 @@ pub fn build_bundle_from_parts(
 
 /// Generates a rich, deterministic multi-frame demo bundle showcasing clicks, circles, arrows, pins, and aligned speech.
 pub fn generate_demo_bundle(out: Option<PathBuf>) -> Result<(PathBuf, ScrawlBundle, String)> {
+    generate_demo_bundle_with(out, false)
+}
+
+/// `generate_demo_bundle`, with the circle and the hand-drawn arrow drawn by the shape tools
+/// (a box and an arrow) when `shapes`.
+pub fn generate_demo_bundle_with(
+    out: Option<PathBuf>,
+    shapes: bool,
+) -> Result<(PathBuf, ScrawlBundle, String)> {
     let bundle_dir = out.unwrap_or_else(|| {
         handoff::default_captures_dir().join(format!("{}.scrawl", make_bundle_id()))
     });
@@ -1511,7 +1523,50 @@ pub fn generate_demo_bundle(out: Option<PathBuf>) -> Result<(PathBuf, ScrawlBund
         ],
     };
 
-    let strokes = vec![circle_stroke, arrow_shaft, arrow_head, pin_stroke];
+    let shape = |tool: Tool, from: [f32; 2], to: [f32; 2], t0: u64, on: &str| {
+        let px = |p: [f32; 2]| [p[0] * fw as f32, p[1] * fh as f32];
+        let outline = crate::shapes::outline(tool, px(from), px(to));
+        let mut pts = Vec::with_capacity(outline.len() * 3);
+        for (i, p) in outline.iter().enumerate() {
+            pts.extend_from_slice(&[
+                (p[0] / fw as f32 * SCALE as f32).round() as i32,
+                (p[1] / fh as f32 * SCALE as f32).round() as i32,
+                i as i32 * 4,
+            ]);
+        }
+        Stroke {
+            t0,
+            t1: t0 + outline.len() as u64 * 4,
+            fw,
+            fh,
+            on: Some(on.into()),
+            pin: None,
+            laser: false,
+            tool: Some(tool),
+            pts,
+        }
+    };
+    let strokes = if shapes {
+        vec![
+            shape(
+                Tool::Rect,
+                [0.235, 0.135],
+                [0.565, 0.205],
+                2_900,
+                "Band header",
+            ),
+            shape(
+                Tool::Arrow,
+                [0.22, 0.48],
+                [0.44, 0.36],
+                5_800,
+                "Used 12 tools",
+            ),
+            pin_stroke,
+        ]
+    } else {
+        vec![circle_stroke, arrow_shaft, arrow_head, pin_stroke]
+    };
     let events = vec![
         InteractionEvent::Click {
             t: 1_250,
@@ -1616,8 +1671,12 @@ fn main() -> Result<()> {
             ui::run_app(None, record, iphone, None);
             Ok(())
         }
-        Command::Demo { out, clipboard } => {
-            let (dir, _bundle, summary) = generate_demo_bundle(out)?;
+        Command::Demo {
+            out,
+            clipboard,
+            shapes,
+        } => {
+            let (dir, _bundle, summary) = generate_demo_bundle_with(out, shapes)?;
             if clipboard {
                 let _ = handoff::copy_bundle_to_clipboard(&dir);
             }
