@@ -537,6 +537,29 @@ fn narrate(narration: &Narration, movie: Option<&[f32]>) -> Result<(Vec<f32>, Op
     Ok((merged, note))
 }
 
+/// What the Mac's inputs heard before the movie's first frame (nothing when they began after it).
+fn before_the_movie(narration: &Narration) -> Result<Vec<f32>> {
+    if narration.late_ms >= 0 {
+        return Ok(Vec::new());
+    }
+    let mut mac = crate::audio::decode_wav_16k(&narration.audio.wav_bytes)?;
+    mac.truncate(narration.late_ms.unsigned_abs() as usize * 16);
+    Ok(mac)
+}
+
+/// Moves a transcript of `pre_ms` before the movie plus the movie onto the movie's clock: words
+/// said before its first frame land at 0:00.
+fn starting_at_the_movie(transcript: &mut crate::model::TranscriptData, pre_ms: u64) {
+    for segment in &mut transcript.segments {
+        segment.t0 = segment.t0.saturating_sub(pre_ms);
+        segment.t1 = segment.t1.saturating_sub(pre_ms).max(segment.t0);
+    }
+    for word in &mut transcript.words {
+        word.t0 = word.t0.saturating_sub(pre_ms);
+        word.t1 = word.t1.saturating_sub(pre_ms).max(word.t0);
+    }
+}
+
 /// `app` is the display name and `bundle_id` the identifier; an old timeline without a bundle
 /// ID falls back to the name for both.
 pub fn phone_target(
@@ -657,6 +680,9 @@ pub fn build_movie_bundle(
         let audio_started = Instant::now();
         let exported = helper::export_audio(&capture.movie, &wav)
             .and_then(|()| crate::audio::recorded_audio_from_wav(std::fs::read(&wav)?));
+        // With the Mac's inputs (`backupMics`), what they heard before the movie's first frame
+        // too: the mirror takes a few seconds to start, and words said then belong at 0:00.
+        let mut pre_roll = Vec::new();
         let exported = match &capture.narration {
             None => exported,
             Some(narration) => {
@@ -664,6 +690,7 @@ pub fn build_movie_bundle(
                     .as_ref()
                     .ok()
                     .and_then(|a| crate::audio::decode_wav_16k(&a.wav_bytes).ok());
+                pre_roll = before_the_movie(narration).unwrap_or_default();
                 narrate(narration, movie.as_deref()).and_then(|(samples, _)| {
                     let bytes = crate::audio::encode_wav_16k(&samples)?;
                     std::fs::write(&wav, &bytes)?;
@@ -677,8 +704,31 @@ pub fn build_movie_bundle(
             Err(e) => (None, Some(e)),
         };
         let t0 = Instant::now();
-        let transcript =
-            crate::transcribe::transcribe(audio.as_ref().map(|_| wav.as_path()), audio.as_ref());
+        let with_pre_roll = audio
+            .as_ref()
+            .filter(|_| !pre_roll.is_empty())
+            .and_then(|audio| {
+                let mut samples = std::mem::take(&mut pre_roll);
+                let pre_ms = samples.len() as u64 / 16;
+                samples.extend(crate::audio::decode_wav_16k(&audio.wav_bytes).ok()?);
+                let bytes = crate::audio::encode_wav_16k(&samples).ok()?;
+                let path = bundle_dir.join(".narration.wav");
+                std::fs::write(&path, &bytes).ok()?;
+                let full = crate::audio::recorded_audio_from_wav(bytes).ok()?;
+                Some((path, full, pre_ms))
+            });
+        let transcript = match &with_pre_roll {
+            Some((path, full, pre_ms)) => {
+                let mut transcript =
+                    crate::transcribe::transcribe(Some(path.as_path()), Some(full));
+                let _ = std::fs::remove_file(path);
+                starting_at_the_movie(&mut transcript, *pre_ms);
+                transcript
+            }
+            None => {
+                crate::transcribe::transcribe(audio.as_ref().map(|_| wav.as_path()), audio.as_ref())
+            }
+        };
         let transcribe_ms = t0.elapsed().as_millis() as u64;
         (
             (transcript, audio_ms, transcribe_ms, audio_err),
@@ -2033,6 +2083,45 @@ mod tests {
         // A movie without a microphone track: the Mac's alone.
         let (merged, _) = narrate(&mac_of(&mac, 0), None).unwrap();
         assert_eq!(merged.len(), mac.len());
+
+        // The mirror's first frame came 2 s after the press: those 2 s are kept for the words.
+        let early = mac_of(&mac, -2_000);
+        assert_eq!(super::before_the_movie(&early).unwrap().len(), 2 * RATE);
+        assert!(
+            super::before_the_movie(&mac_of(&mac, 300))
+                .unwrap()
+                .is_empty()
+        );
+        let mut transcript = crate::model::TranscriptData {
+            segments: vec![
+                crate::model::TranscriptSegment {
+                    t0: 500,
+                    t1: 1_800,
+                    text: "Look".into(),
+                },
+                crate::model::TranscriptSegment {
+                    t0: 2_600,
+                    t1: 3_000,
+                    text: "here".into(),
+                },
+            ],
+            words: vec![crate::model::WordTiming {
+                t0: 2_600,
+                t1: 3_000,
+                text: "here".into(),
+            }],
+            ..Default::default()
+        };
+        super::starting_at_the_movie(&mut transcript, 2_000);
+        assert_eq!(
+            (transcript.segments[0].t0, transcript.segments[0].t1),
+            (0, 0)
+        );
+        assert_eq!(
+            (transcript.segments[1].t0, transcript.segments[1].t1),
+            (600, 1_000)
+        );
+        assert_eq!(transcript.words[0].t0, 600);
     }
 
     use super::*;
