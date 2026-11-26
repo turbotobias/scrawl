@@ -53,9 +53,52 @@ pub struct PhoneSession {
     session_epoch_ms: u64,
     /// Held while the mirror records (not while it only previews).
     busy: Option<crate::retention::Recording>,
-    /// The Mac's microphone again while recording, only for the capsule's live waveform and words:
-    /// the helper records the narration into the movie, where Scrawl can't hear it until the end.
+    /// The Mac's microphones while recording. With `backupMics` they record the narration too,
+    /// every input in `mic::recording_order` at once, and the movie's microphone (the first of
+    /// them) is the last backup (`narrate`). Otherwise only for the capsule's live waveform and
+    /// words: the helper records the narration into the movie, where Scrawl can't hear it until
+    /// the end.
     listen: Option<crate::audio::AudioRecorder>,
+    /// Whether `listen` records the narration (`backupMics`).
+    narrating: bool,
+}
+
+/// What the Mac's inputs heard during an iPhone capture (`backupMics`), starting `late_ms` after
+/// the movie's first frame (earlier when negative).
+pub struct Narration {
+    pub audio: crate::audio::RecordedAudio,
+    pub late_ms: i64,
+}
+
+/// The Mac's microphones for a recording: all of them, recording (`backupMics`), else one only
+/// for showing live audio. Returns whether they record.
+fn mac_microphones() -> (Option<crate::audio::AudioRecorder>, bool) {
+    if crate::handoff::experiment("backupMics") {
+        let recorder = crate::audio::AudioRecorder::start()
+            .inspect_err(|error| scrawl_log(format!("iPhone narration: {error:#}")))
+            .ok();
+        let narrating = recorder.is_some();
+        (recorder, narrating)
+    } else {
+        (crate::audio::AudioRecorder::listen(), false)
+    }
+}
+
+/// The microphone the helper records into the movie: the first input of the order with
+/// `backupMics`, else the chosen one (`None`: the macOS default).
+fn movie_microphone() -> Option<(String, String)> {
+    if crate::handoff::experiment("backupMics") {
+        let inputs = crate::mic::inputs();
+        let order = crate::mic::recording_order(
+            crate::mic::order().as_deref(),
+            crate::mic::choice().as_ref(),
+            &inputs,
+        );
+        if let Some(first) = order.into_iter().next() {
+            return Some((first.id, first.name));
+        }
+    }
+    crate::mic::choice().map(|choice| (choice.id, choice.name))
 }
 
 pub struct PhoneRecording {
@@ -65,6 +108,8 @@ pub struct PhoneRecording {
     pub offset_ms: u64,
     /// M presses in the mirror, on the movie's clock.
     pub flags: Vec<u64>,
+    /// What the Mac's inputs heard (`backupMics`).
+    pub narration: Option<Narration>,
 }
 
 #[derive(Deserialize)]
@@ -141,14 +186,10 @@ impl PhoneSession {
         {
             command.arg("--device").arg(id);
         }
-        // Narration comes from the Mac's microphone: the chosen one, if any.
-        if let Some(choice) = crate::mic::choice() {
-            command.args([
-                "--microphone",
-                &choice.id,
-                "--microphone-name",
-                &choice.name,
-            ]);
+        // Narration comes from the Mac's microphone: the chosen one, if any (the first of the
+        // order with `backupMics`).
+        if let Some((id, name)) = movie_microphone() {
+            command.args(["--microphone", &id, "--microphone-name", &name]);
         }
         let mut child = command
             .stdin(Stdio::piped())
@@ -268,11 +309,15 @@ impl PhoneSession {
             cancelled,
             started_at: Instant::now(),
             session_epoch_ms,
-            listen: recording
-                .is_some()
-                .then(crate::audio::AudioRecorder::listen)
-                .flatten(),
+            listen: None,
+            narrating: false,
             busy: recording,
+        })
+        .map(|mut session| {
+            if session.busy.is_some() {
+                (session.listen, session.narrating) = mac_microphones();
+            }
+            session
         })
     }
 
@@ -282,7 +327,8 @@ impl PhoneSession {
         self.session_epoch_ms = crate::now_epoch_ms();
         self.busy
             .get_or_insert_with(crate::retention::Recording::start);
-        self.listen = crate::audio::AudioRecorder::listen();
+        self.listen.take();
+        (self.listen, self.narrating) = mac_microphones();
         {
             let mut state = self.lock();
             state.recording_epoch_ms = None;
@@ -386,7 +432,21 @@ impl PhoneSession {
 
     /// Stops recording and waits for the helper to finalize the movie.
     pub fn stop(mut self) -> Result<PhoneRecording> {
-        self.listen.take();
+        // The Mac's inputs stop with the press; the movie a moment later.
+        let mac = self
+            .listen
+            .take()
+            .filter(|_| self.narrating)
+            .and_then(|recorder| {
+                let began = recorder
+                    .began()
+                    .map(|at| crate::now_epoch_ms() as i64 - at.elapsed().as_millis() as i64);
+                recorder
+                    .stop()
+                    .inspect_err(|error| scrawl_log(format!("iPhone narration: {error:#}")))
+                    .ok()
+                    .map(|audio| (audio, began))
+            });
         self.send("stop");
         self.wait(Duration::from_secs(15));
         let state = std::mem::take(&mut *self.lock());
@@ -400,6 +460,10 @@ impl PhoneSession {
         };
         let device = state.device.context("No iPhone was attached")?;
         let started = state.recording_epoch_ms.unwrap_or(self.session_epoch_ms);
+        let narration = mac.map(|(audio, began)| Narration {
+            audio,
+            late_ms: began.map_or(0, |began| began - started as i64),
+        });
         Ok(PhoneRecording {
             movie,
             device,
@@ -409,6 +473,7 @@ impl PhoneSession {
                 .iter()
                 .map(|at| at.saturating_sub(started))
                 .collect(),
+            narration,
         })
     }
 
@@ -436,6 +501,40 @@ pub struct MovieCapture {
     pub context: BTreeMap<String, String>,
     pub context_changes: Vec<ContextChange>,
     pub screens: Vec<ScreenSpan>,
+    /// What the Mac's inputs heard (`backupMics`): merged with the movie's track, which is then
+    /// the last backup.
+    pub narration: Option<Narration>,
+}
+
+/// The narration on the movie's clock: the Mac's inputs (`backupMics`) first, the movie's own
+/// track standing in for each second they didn't hear. Returns the samples and what stood in.
+fn narrate(narration: &Narration, movie: Option<&[f32]>) -> Result<(Vec<f32>, Option<String>)> {
+    let mut mac = crate::audio::decode_wav_16k(&narration.audio.wav_bytes)?;
+    crate::audio::align(&mut mac, narration.late_ms * 16);
+    let mac_note = narration.audio.switched.clone();
+    let Some(movie) = movie.filter(|m| !m.is_empty()) else {
+        return Ok((mac, mac_note));
+    };
+    let (mut merged, chosen) = crate::audio::merge(&[mac, movie.to_vec()]);
+    // The movie is the capture's clock: nothing after it ends.
+    merged.truncate(movie.len());
+    let movie_from = chosen.iter().position(|&take| take == 1);
+    let note = movie_from
+        .map(|second| {
+            format!(
+                "used the iPhone movie's microphone from {}:{:02}",
+                second / 60,
+                second % 60
+            )
+        })
+        .or(mac_note);
+    scrawl_log(format!(
+        "iPhone narration: Mac inputs {} ms after the movie · {}",
+        narration.late_ms,
+        note.as_deref()
+            .unwrap_or("the Mac's first input heard it all")
+    ));
+    Ok((merged, note))
 }
 
 /// `app` is the display name and `bundle_id` the identifier; an old timeline without a bundle
@@ -558,6 +657,20 @@ pub fn build_movie_bundle(
         let audio_started = Instant::now();
         let exported = helper::export_audio(&capture.movie, &wav)
             .and_then(|()| crate::audio::recorded_audio_from_wav(std::fs::read(&wav)?));
+        let exported = match &capture.narration {
+            None => exported,
+            Some(narration) => {
+                let movie = exported
+                    .as_ref()
+                    .ok()
+                    .and_then(|a| crate::audio::decode_wav_16k(&a.wav_bytes).ok());
+                narrate(narration, movie.as_deref()).and_then(|(samples, _)| {
+                    let bytes = crate::audio::encode_wav_16k(&samples)?;
+                    std::fs::write(&wav, &bytes)?;
+                    crate::audio::recorded_audio_from_wav(bytes)
+                })
+            }
+        };
         let audio_ms = audio_started.elapsed().as_millis() as u64;
         let (audio, audio_err) = match exported {
             Ok(a) => (Some(a), None),
@@ -657,6 +770,7 @@ pub fn finalize_live_capture(
             context: BTreeMap::new(),
             context_changes: Vec::new(),
             screens: Vec::new(),
+            narration: recording.narration,
         },
     )?;
     // The native video is ~18 Mbps; re-encode it a minute from now (in the app).
@@ -1055,6 +1169,7 @@ pub fn import(
             context: timeline.context(),
             context_changes: timeline.context_changes(),
             screens: timeline.screen_spans(probe.duration_ms),
+            narration: None,
         },
     )
 }
@@ -1871,6 +1986,55 @@ fn poll_usb_app_containers(apps: &[String], config: &IngestConfig) -> Result<()>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn iphone_narration_comes_from_the_mac_inputs_and_the_movie_stands_in() {
+        use super::{Narration, narrate};
+        const RATE: usize = 16_000;
+        let speech = |seconds: usize, quiet: f32, speaking: &dyn Fn(usize) -> bool| -> Vec<f32> {
+            (0..seconds * RATE)
+                .map(|i| {
+                    if speaking(i / RATE) {
+                        0.1 * (i as f32 * 0.2).sin()
+                    } else if i % 2 == 0 {
+                        quiet
+                    } else {
+                        -quiet
+                    }
+                })
+                .collect()
+        };
+        let mac_of = |samples: &[f32], late_ms: i64| Narration {
+            audio: crate::audio::recorded_audio_from_wav(
+                crate::audio::encode_wav_16k(samples).unwrap(),
+            )
+            .unwrap(),
+            late_ms,
+        };
+        let talk = |s: usize| s % 3 != 2;
+        // The movie's microphone was AirPods the iPhone took: digital silence throughout.
+        let airpods = vec![0.0; 6 * RATE];
+        let mac = speech(6, 0.003, &talk);
+        let (merged, note) = narrate(&mac_of(&mac, 0), Some(&airpods)).unwrap();
+        assert_eq!(merged.len(), airpods.len());
+        assert!((merged[RATE / 2] - mac[RATE / 2]).abs() < 1e-4);
+        assert_eq!(note, None);
+
+        // The Mac's inputs began 500 ms after the movie: they line up on the movie's clock.
+        let (merged, _) = narrate(&mac_of(&mac, 500), Some(&airpods)).unwrap();
+        assert_eq!(merged[..RATE / 2].iter().filter(|s| **s != 0.0).count(), 0);
+        assert!((merged[RATE] - mac[RATE / 2]).abs() < 1e-4);
+
+        // The Mac heard nothing: the movie's track stands in.
+        let movie = speech(6, 0.0005, &talk);
+        let (merged, note) = narrate(&mac_of(&vec![0.0; 6 * RATE], 0), Some(&movie)).unwrap();
+        assert!((merged[RATE / 2] - movie[RATE / 2]).abs() < 1e-4);
+        assert!(note.unwrap().contains("from 0:00"));
+
+        // A movie without a microphone track: the Mac's alone.
+        let (merged, _) = narrate(&mac_of(&mac, 0), None).unwrap();
+        assert_eq!(merged.len(), mac.len());
+    }
+
     use super::*;
 
     fn touch(t: f64, id: i64, x: f64, y: f64, phase: &str) -> Touch {

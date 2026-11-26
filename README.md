@@ -289,10 +289,13 @@ MacBook Pro Microphone from 0:42** when a backup stood in. Move an input up or d
 add another (System default included); without an order of your own it's the chosen input, then
 the Mac's built-in microphone. It's saved as `"microphones": [{"id", "name"}, …]`. At most three
 record at once; a Bluetooth headset's microphone switches it to call quality while it records.
+iPhone captures use the order too: the Mac's inputs record the narration, and the mirror's movie
+records the first of them as one more backup.
 
 **Show live audio while recording** (off by default, `"liveAudio": true`) puts a waveform beside
 the timer while you record, so you can see the microphone is hearing you: dim dots are silence,
-and a flat red line means the microphone is sending nothing at all. With Apple Speech on macOS 26,
+and a flat red line means the microphone is sending nothing at all (or only digital silence, as
+AirPods do once the iPhone takes them). With Apple Speech on macOS 26,
 the capsule also grows a row under the controls with the words as you say them, about a second
 behind. It's only for you: the transcript is still made from the finished recording. It shows for a
 cabled iPhone too. From the terminal, `scrawl mic list` shows the inputs and the

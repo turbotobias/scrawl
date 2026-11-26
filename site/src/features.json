@@ -717,7 +717,7 @@
       "status": "experiment:backupMics",
       "platforms": ["mac"],
       "added": "2026-11-23",
-      "note": "Without an order it's the chosen input, then the built-in microphone. The iPhone mirror's narration uses one input.",
+      "note": "Without an order it's the chosen input, then the built-in microphone. iPhone captures use the order too, the mirror's own microphone track the last backup.",
       "config": [{ "key": "microphones", "value": "[{\"id\", \"name\"}, …]", "does": "Inputs in priority order; \"default\" is the macOS default" }],
       "docs": ["README.md#settings", "docs/keyframes-and-text.md", "docs/onboarding-and-settings.md"]
     },

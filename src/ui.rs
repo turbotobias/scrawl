@@ -3379,7 +3379,19 @@ impl ScrawlCoordinator {
                             }
                             let duration_ms =
                                 finalized.as_ref().map_or(0, |(_, b, _)| b.duration_ms);
-                            return (finalized, duration_ms, crate::audio::Sound::Heard, None);
+                            // What the narration heard, so an empty one says so at once.
+                            let sound = finalized.as_ref().ok().map_or(
+                                crate::audio::Sound::Heard,
+                                |(dir, _, _)| {
+                                    std::fs::read(dir.join("audio.wav"))
+                                        .ok()
+                                        .and_then(|wav| crate::audio::decode_wav_16k(&wav).ok())
+                                        .map_or(crate::audio::Sound::Nothing, |samples| {
+                                            crate::audio::Sound::of(&samples, false)
+                                        })
+                                },
+                            );
+                            return (finalized, duration_ms, sound, None);
                         }
                         CaptureSource::Lab => {
                             return (

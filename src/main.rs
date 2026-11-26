@@ -1868,6 +1868,7 @@ fn main() -> Result<()> {
                                 context: old.context.clone(),
                                 context_changes: old.context_changes.clone(),
                                 screens: old.screens.clone(),
+                                narration: None,
                             },
                         )?;
                         let _ = handoff::copy_bundle_to_clipboard(&iter_out);
@@ -1992,6 +1993,7 @@ fn main() -> Result<()> {
                         context: old.context,
                         context_changes: old.context_changes,
                         screens: old.screens,
+                        narration: None,
                     },
                 )?
                 .2

@@ -22,6 +22,9 @@ pub const BUCKET: usize = SAMPLE_RATE / 20;
 const HISTORY: usize = 160;
 /// No new samples for this long and the waveform says the microphone stopped.
 const STALL: Duration = Duration::from_millis(600);
+/// Digital silence (every sample exactly zero) this long is a dead input too: AirPods taken by
+/// the iPhone, a muted interface. Longer than `STALL`, since Bluetooth inputs start on a moment of it.
+const ZERO_STALL: Duration = Duration::from_millis(1_500);
 /// Below this a bar is silence; at `LOUD` it's full height (dBFS of the bucket's RMS).
 const QUIET_DB: f32 = -54.0;
 const LOUD_DB: f32 = -12.0;
@@ -120,6 +123,8 @@ pub struct Levels {
     partial: Vec<f32>,
     bars: VecDeque<f32>,
     heard_at: Option<Instant>,
+    /// When a sample other than exactly zero last came.
+    sound_at: Option<Instant>,
     started: Option<Instant>,
     shown_stalled: bool,
 }
@@ -132,6 +137,7 @@ impl Default for Levels {
             partial: Vec::with_capacity(BUCKET),
             bars: VecDeque::with_capacity(HISTORY),
             heard_at: None,
+            sound_at: None,
             started: None,
             shown_stalled: false,
         }
@@ -165,7 +171,10 @@ impl Levels {
         }
         self.read += fresh.len();
         self.heard_at = Some(now);
-        self.shown_stalled = false;
+        if fresh.iter().any(|&sample| sample != 0.0) {
+            self.sound_at = Some(now);
+        }
+        self.shown_stalled = self.stalled(now);
         self.push(&fresh);
         true
     }
@@ -203,13 +212,15 @@ impl Levels {
     }
 
     /// Whether the microphone has gone quiet in the sense of sending nothing at all (unplugged,
-    /// stuck, or never opened): no samples for `STALL`, counted from the start of the recording.
+    /// stuck, or never opened): no samples for `STALL`, or only digital silence for `ZERO_STALL`,
+    /// counted from the start of the recording.
     pub fn stalled(&self, now: Instant) -> bool {
-        match (self.heard_at, self.started) {
-            (Some(heard), _) => now.saturating_duration_since(heard) > STALL,
-            (None, Some(started)) => now.saturating_duration_since(started) > STALL,
-            (None, None) => false,
-        }
+        let quiet_for = |at: Option<Instant>| {
+            at.or(self.started)
+                .map(|at| now.saturating_duration_since(at))
+        };
+        quiet_for(self.heard_at).is_some_and(|quiet| quiet > STALL)
+            || quiet_for(self.sound_at).is_some_and(|quiet| quiet > ZERO_STALL)
     }
 }
 
@@ -385,12 +396,31 @@ mod tests {
         levels.update(&quiet, now);
         assert!(!levels.stalled(now));
         assert!(levels.stalled(quiet.started + STALL + Duration::from_millis(50)));
-        // Samples arriving (even silent ones) mean it's working.
-        quiet.samples.lock().unwrap().extend([0.0; 160]);
+        // Samples arriving (even quiet ones) mean it's working.
+        quiet.samples.lock().unwrap().extend([1e-4; 160]);
         let later = now + Duration::from_secs(2);
         levels.update(&quiet, later);
         assert!(!levels.stalled(later));
         assert!(levels.stalled(later + STALL + Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn a_microphone_sending_only_digital_silence_shows_as_stalled() {
+        // AirPods taken by the iPhone keep sending samples, every one exactly zero.
+        let dead = feed(1, vec![0.0; 1_600]);
+        let mut levels = Levels::default();
+        let soon = dead.started + Duration::from_secs(1);
+        dead.samples.lock().unwrap().extend([0.0; 160]);
+        levels.update(&dead, soon);
+        assert!(!levels.stalled(soon));
+        let later = dead.started + ZERO_STALL + Duration::from_millis(50);
+        dead.samples.lock().unwrap().extend([0.0; 160]);
+        levels.update(&dead, later);
+        assert!(levels.stalled(later));
+        // The first real sound clears it.
+        dead.samples.lock().unwrap().extend([1e-4; 160]);
+        levels.update(&dead, later);
+        assert!(!levels.stalled(later));
     }
 
     #[test]

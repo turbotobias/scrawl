@@ -346,6 +346,11 @@ impl AudioRecorder {
         Ok(())
     }
 
+    /// When the first input's first samples came, so another clock can line them up (`phone`).
+    pub fn began(&self) -> Option<Instant> {
+        self.first.get().copied()
+    }
+
     pub fn stop(mut self) -> Result<RecordedAudio> {
         self.stop_showing();
         // Joining drops the stream and stops its callback before taking the buffer,
@@ -462,7 +467,7 @@ struct Track {
 }
 
 /// Shifts `samples` later by `late` samples (silence before), or earlier when negative.
-fn align(samples: &mut Vec<f32>, late: i64) {
+pub(crate) fn align(samples: &mut Vec<f32>, late: i64) {
     if late > 0 {
         samples.splice(0..0, std::iter::repeat_n(0.0, late as usize));
     } else {
