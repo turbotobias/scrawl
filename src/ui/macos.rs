@@ -425,6 +425,17 @@ objc2::define_class!(
             let _ = self.ivars().sender.try_send(MenuAction::ExportVideo);
         }
 
+        #[unsafe(method(useTrack:))]
+        fn use_track(&self, sender: &NSMenuItem) {
+            let file = sender
+                .representedObject()
+                .and_then(|object| object.downcast::<NSString>().ok())
+                .map(|file| file.to_string());
+            if let Some(file) = file {
+                let _ = self.ivars().sender.try_send(MenuAction::UseTrack(file));
+            }
+        }
+
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: &AnyObject) {
             let _ = self.ivars().sender.try_send(MenuAction::Settings);
@@ -465,6 +476,7 @@ objc2::define_class!(
             if let Some(item) = menu.itemWithTag(EXPORT_VIDEO_MENU_TAG) {
                 item.setHidden(!crate::handoff::video_export());
             }
+            rebuild_audio_menu(menu, self);
         }
     }
 );
@@ -473,6 +485,8 @@ objc2::define_class!(
 const INBOX_MENU_TAG: isize = 0x5c4a;
 /// Tag on **Export Last Capture as Video…**, shown only with `"videoExport": true`.
 const EXPORT_VIDEO_MENU_TAG: isize = 0x5c4e;
+/// Tag on **Audio of Last Capture**, shown when it kept more than one microphone's track.
+const AUDIO_MENU_TAG: isize = 0x5c50;
 /// Tag on **Record Screen**, whose title carries the record shortcut.
 const RECORD_MENU_TAG: isize = 0x5c4d;
 /// Tag on **Choose What to Record…**, whose title says how the shortcut chooses.
@@ -509,6 +523,47 @@ fn choose_menu_title() -> String {
     } else {
         format!("Choose What to Record…  hold {}, Tab", record.label)
     }
+}
+
+/// **Audio of Last Capture**: each microphone the latest capture kept (`tracks`), the one in use
+/// checked; choosing one makes it the capture's audio and copies it again.
+fn rebuild_audio_menu(menu: &NSMenu, target: &ScrawlMenuTarget) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(item) = menu.itemWithTag(AUDIO_MENU_TAG) else {
+        return;
+    };
+    let tracks = crate::handoff::load_bundle(std::path::Path::new("latest"))
+        .ok()
+        .and_then(|(dir, _)| crate::tracks::read(&dir));
+    let Some(tracks) = tracks else {
+        item.setHidden(true);
+        return;
+    };
+    let submenu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Audio"));
+    for track in &tracks.tracks {
+        let row = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(&track.name),
+                Some(sel!(useTrack:)),
+                &NSString::new(),
+            )
+        };
+        unsafe {
+            row.setTarget(Some(target));
+            row.setRepresentedObject(Some(&NSString::from_str(&track.file)));
+        }
+        row.setState(if track.file == tracks.using {
+            objc2_app_kit::NSControlStateValueOn
+        } else {
+            objc2_app_kit::NSControlStateValueOff
+        });
+        submenu.addItem(&row);
+    }
+    item.setSubmenu(Some(&submenu));
+    item.setHidden(false);
 }
 
 /// Lists unhandled iPhone captures at the top of the status menu, read fresh from disk so the
@@ -664,6 +719,17 @@ pub(super) fn install_status_bar() -> Option<flume::Receiver<MenuAction>> {
         item.setTag(EXPORT_VIDEO_MENU_TAG);
         item.setHidden(!crate::handoff::video_export());
     }
+    let audio = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Audio of Last Capture"),
+            None,
+            &NSString::new(),
+        )
+    };
+    audio.setTag(AUDIO_MENU_TAG);
+    audio.setHidden(true);
+    menu.addItem(&audio);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     add("Settings…", sel!(openSettings:));
     if let Some(item) = menu.itemAtIndex(menu.numberOfItems() - 1) {

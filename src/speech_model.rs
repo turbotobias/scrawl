@@ -379,6 +379,17 @@ pub fn transcribe_again(dir: &Path) -> Result<bool> {
     {
         return Ok(false);
     }
+    rewrite_transcript(&dir, &mut bundle, transcript)?;
+    let _ = std::fs::remove_file(dir.join(PENDING));
+    Ok(true)
+}
+
+/// Puts `transcript` in a built bundle: each keyframe's words, `scrawl.json` and `summary.md`.
+pub fn rewrite_transcript(
+    dir: &Path,
+    bundle: &mut crate::model::ScrawlBundle,
+    transcript: crate::model::TranscriptData,
+) -> Result<()> {
     let times: Vec<u64> = bundle.keyframes.iter().map(|k| k.t).collect();
     let said = crate::keyframes::said_per_keyframe(&times, &[], &transcript);
     for (frame, said) in bundle.keyframes.iter_mut().zip(said) {
@@ -391,10 +402,9 @@ pub fn transcribe_again(dir: &Path) -> Result<bool> {
     )?;
     std::fs::write(
         dir.join("summary.md"),
-        crate::sketch::summary_markdown(&bundle, &dir),
+        crate::sketch::summary_markdown(bundle, dir),
     )?;
-    let _ = std::fs::remove_file(dir.join(PENDING));
-    Ok(true)
+    Ok(())
 }
 
 #[cfg(test)]

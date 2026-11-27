@@ -624,7 +624,12 @@ pub struct Metrics {
     pub inspect: f32,
     pub clock_000: f32,
     pub clock_0000: f32,
+    pub starting: f32,
 }
+
+/// Where the timer goes while a capture waits for its first frame (the iPhone mirror's movie
+/// starts a few seconds after the press).
+pub const STARTING: &str = "Starting…";
 
 impl Default for Metrics {
     fn default() -> Self {
@@ -641,6 +646,7 @@ impl Default for Metrics {
             inspect: 47.0,
             clock_000: 29.0,
             clock_0000: 37.0,
+            starting: 64.0,
         }
     }
 }
@@ -664,7 +670,9 @@ impl Metrics {
     }
 
     pub fn clock_width(&self, clock: &str) -> f32 {
-        if clock.len() <= 4 {
+        if clock == STARTING {
+            self.starting
+        } else if clock.len() <= 4 {
             self.clock_000
         } else {
             self.clock_0000

@@ -1,6 +1,6 @@
 use std::io::Cursor;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -18,6 +18,9 @@ pub struct RecordedAudio {
     pub sound: Sound,
     /// "used MacBook Pro Microphone from 0:42": a backup input stood in (`backupMics`, `merge`).
     pub switched: Option<String>,
+    /// Each input's name and samples, lined up on this recording's clock (`backupMics`), so the
+    /// bundle can keep them to choose from (`tracks`).
+    pub tracks: Vec<(String, Vec<f32>)>,
 }
 
 /// What a capture's microphone gave, so a muted, wrong or broken input is noticed when the
@@ -90,8 +93,11 @@ pub struct AudioRecorder {
     live: Option<crate::live_transcribe::Live>,
     /// A live transcription only for showing the words (`live_audio`), dropped at stop.
     preview: Option<crate::live_transcribe::Live>,
-    /// The capsule's view of this recording (`live_audio::begin`).
-    shown: Option<u64>,
+    /// The capsule's view of this recording (`live_audio::begin`): the feed's id, which
+    /// `follow_the_input_that_hears` moves to a backup while the first sends only silence.
+    shown: Option<Arc<Mutex<u64>>>,
+    /// Stops that watch.
+    following: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// An input recording beside the first, in case that one hears nothing (`backupMics`).
@@ -174,7 +180,20 @@ impl AudioRecorder {
             });
             (None, preview.and_then(|p| p.map_err(log).ok()))
         };
-        let shown = show.then(|| crate::live_audio::begin(Arc::clone(&samples), caption));
+        let shown = show.then(|| {
+            Arc::new(Mutex::new(crate::live_audio::begin(
+                Arc::clone(&samples),
+                caption.clone(),
+            )))
+        });
+        let following = shown.as_ref().filter(|_| backup_mics).map(|shown| {
+            follow_the_input_that_hears(
+                Arc::clone(&samples),
+                Arc::clone(&backups),
+                caption,
+                Arc::clone(shown),
+            )
+        });
         Ok(Self {
             worker: Some(worker),
             stop_sender: Some(stop_sender),
@@ -186,6 +205,7 @@ impl AudioRecorder {
             live,
             preview,
             shown,
+            following,
         })
     }
 
@@ -367,7 +387,7 @@ impl AudioRecorder {
                 .lock()
                 .map_err(|_| anyhow!("Microphone buffer lock poisoned"))?,
         );
-        let (samples_16k, switched, backups_broke) = self.merge_backups(samples_16k);
+        let (samples_16k, switched, backups_broke, tracks) = self.merge_backups(samples_16k);
         if switched.is_some() {
             // The words heard live came from the first input alone.
             self.live.take();
@@ -390,12 +410,18 @@ impl AudioRecorder {
             live: crate::live_transcribe::Slot::new(self.live.take()),
             sound,
             switched,
+            tracks,
         })
     }
 
-    /// The first input's samples merged with the backups' (`merge`), with what stood in and
-    /// whether every backup broke off too (true without backups).
-    fn merge_backups(&self, first: Vec<f32>) -> (Vec<f32>, Option<String>, bool) {
+    /// The first input's samples merged with the backups' (`merge`), with what stood in, whether
+    /// every backup broke off too (true without backups), and each input's own track (none
+    /// without `backupMics`).
+    #[allow(clippy::type_complexity)]
+    fn merge_backups(
+        &self,
+        first: Vec<f32>,
+    ) -> (Vec<f32>, Option<String>, bool, Vec<(String, Vec<f32>)>) {
         let backups = std::mem::take(
             &mut *self
                 .backups
@@ -403,7 +429,17 @@ impl AudioRecorder {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
         );
         if backups.is_empty() {
-            return (first, None, true);
+            let name = self
+                .name
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let tracks = if name.is_empty() {
+                Vec::new()
+            } else {
+                vec![(name, first.clone())]
+            };
+            return (first, None, true, tracks);
         }
         let start = self.first.get().copied();
         let mut names = vec![
@@ -445,6 +481,7 @@ impl AudioRecorder {
             names.push(backup.name);
         }
         let (merged, chosen) = merge(&takes);
+        let tracks: Vec<(String, Vec<f32>)> = names.iter().cloned().zip(takes).collect();
         let switched = chosen.iter().position(|&t| t != 0).map(|seg| {
             let name = &names[chosen[seg]];
             format!("used {name} from {}", clock(seg as u64 * 1_000))
@@ -454,8 +491,83 @@ impl AudioRecorder {
             names.join(", "),
             switched.as_deref().unwrap_or("the first heard it all")
         ));
-        (merged, switched, all_broke)
+        (merged, switched, all_broke, tracks)
     }
+}
+
+/// An input whose samples were all exactly zero (or that sent none) for this long is dead to the
+/// capsule: AirPods the iPhone took, a muted interface.
+const DEAD_AFTER: Duration = Duration::from_millis(1_500);
+
+/// Which of `heard` (when each input last sent a sample other than zero) the capsule shows: the
+/// first in the order that's alive, else the one it shows now.
+fn input_to_show(heard: &[Option<Instant>], now: Instant, showing: usize) -> usize {
+    heard
+        .iter()
+        .position(|at| at.is_some_and(|at| now.saturating_duration_since(at) < DEAD_AFTER))
+        .unwrap_or(showing)
+}
+
+/// While recording with backups (`backupMics`), keeps the capsule's waveform on the first input
+/// that's sending sound, so AirPods taken by the iPhone don't look like nothing is recording when
+/// the Mac's microphone still is. Returns the flag that stops it.
+fn follow_the_input_that_hears(
+    first: Arc<Mutex<Vec<f32>>>,
+    backups: Arc<Mutex<Vec<Backup>>>,
+    caption: Option<Arc<Mutex<crate::live_audio::Caption>>>,
+    shown: Arc<Mutex<u64>>,
+) -> Arc<std::sync::atomic::AtomicBool> {
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop = Arc::clone(&done);
+    let _ = std::thread::Builder::new()
+        .name("scrawl-audio-follow".into())
+        .spawn(move || {
+            let started = Instant::now();
+            let mut read: Vec<usize> = Vec::new();
+            let mut heard: Vec<Option<Instant>> = Vec::new();
+            let mut showing = 0;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(250));
+                let now = Instant::now();
+                let mut inputs = vec![Arc::clone(&first)];
+                inputs.extend(
+                    backups
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .iter()
+                        .map(|backup| Arc::clone(&backup.samples)),
+                );
+                read.resize(inputs.len(), 0);
+                heard.resize(inputs.len(), Some(started));
+                for (i, input) in inputs.iter().enumerate() {
+                    let samples = input
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if samples
+                        .get(read[i]..)
+                        .is_some_and(|fresh| fresh.iter().any(|s| *s != 0.0))
+                    {
+                        heard[i] = Some(now);
+                    }
+                    read[i] = samples.len();
+                }
+                let next = input_to_show(&heard, now, showing);
+                if next != showing {
+                    let mut id = shown
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    crate::live_audio::end(*id);
+                    *id = crate::live_audio::begin(Arc::clone(&inputs[next]), caption.clone());
+                    crate::capture::scrawl_log(format!(
+                        "Live audio: showing input {} of {}",
+                        next + 1,
+                        inputs.len()
+                    ));
+                    showing = next;
+                }
+            }
+        });
+    done
 }
 
 /// The input samples a stream fills, with its error and when its first samples came.
@@ -567,8 +679,11 @@ pub fn merge(takes: &[Vec<f32>]) -> (Vec<f32>, Vec<usize>) {
 impl AudioRecorder {
     /// Takes the recording out of the capsule and stops the words' own transcription.
     fn stop_showing(&mut self) {
+        if let Some(following) = self.following.take() {
+            following.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(id) = self.shown.take() {
-            crate::live_audio::end(id);
+            crate::live_audio::end(*id.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
         }
         self.preview.take();
     }
@@ -655,6 +770,7 @@ pub fn recorded_audio_from_wav(wav_bytes: Vec<u8>) -> Result<RecordedAudio> {
         wav_bytes,
         live: Default::default(),
         switched: None,
+        tracks: Vec::new(),
         sound: Sound::Heard,
     })
 }
@@ -801,6 +917,7 @@ mod tests {
             live: None,
             preview: None,
             shown: None,
+            following: None,
         }
         .stop()
         .unwrap();
@@ -860,6 +977,20 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn the_capsule_shows_the_first_input_still_sending_sound() {
+        let now = Instant::now() + Duration::from_secs(10);
+        let ago = |ms| Some(now - Duration::from_millis(ms));
+        assert_eq!(input_to_show(&[ago(100), ago(100)], now, 0), 0);
+        // AirPods taken by the iPhone: the first sends zeros, so the Mac's microphone shows.
+        assert_eq!(input_to_show(&[ago(3_000), ago(100)], now, 0), 1);
+        // Back as soon as the first sends sound again.
+        assert_eq!(input_to_show(&[ago(100), ago(100)], now, 1), 0);
+        // Nothing sending: it stays, and the red line says so.
+        assert_eq!(input_to_show(&[ago(3_000), ago(3_000)], now, 1), 1);
+        assert_eq!(input_to_show(&[None, ago(100)], now, 0), 1);
     }
 
     #[test]
@@ -925,6 +1056,7 @@ mod tests {
             live: None,
             preview: None,
             shown: None,
+            following: None,
         };
         assert_eq!(recorder(vec![0.1; 160]).stop().unwrap().sample_count, 160);
         assert!(recorder(Vec::new()).stop().is_err());
@@ -943,6 +1075,7 @@ mod tests {
             live: None,
             preview: None,
             shown: None,
+            following: None,
         };
         assert!(
             recorder

@@ -506,15 +506,34 @@ pub struct MovieCapture {
     pub narration: Option<Narration>,
 }
 
+/// Each input's track and the narration as a whole, on the movie's clock (`narrate`).
+type Narrated = (Vec<f32>, Option<String>, Vec<(String, Vec<f32>)>);
+
 /// The narration on the movie's clock: the Mac's inputs (`backupMics`) first, the movie's own
-/// track standing in for each second they didn't hear. Returns the samples and what stood in.
-fn narrate(narration: &Narration, movie: Option<&[f32]>) -> Result<(Vec<f32>, Option<String>)> {
+/// track standing in for each second they didn't hear. Returns the samples, what stood in, and
+/// every input's track (the movie's last) to choose from later (`tracks`).
+fn narrate(narration: &Narration, movie: Option<&[f32]>) -> Result<Narrated> {
+    let late = narration.late_ms * 16;
     let mut mac = crate::audio::decode_wav_16k(&narration.audio.wav_bytes)?;
-    crate::audio::align(&mut mac, narration.late_ms * 16);
+    crate::audio::align(&mut mac, late);
+    let mut tracks: Vec<(String, Vec<f32>)> = narration
+        .audio
+        .tracks
+        .iter()
+        .map(|(name, samples)| {
+            let mut samples = samples.clone();
+            crate::audio::align(&mut samples, late);
+            (name.clone(), samples)
+        })
+        .collect();
     let mac_note = narration.audio.switched.clone();
     let Some(movie) = movie.filter(|m| !m.is_empty()) else {
-        return Ok((mac, mac_note));
+        return Ok((mac, mac_note, tracks));
     };
+    tracks.push(("The iPhone video's own sound".into(), movie.to_vec()));
+    for (_, samples) in &mut tracks {
+        samples.resize(movie.len(), 0.0);
+    }
     let (mut merged, chosen) = crate::audio::merge(&[mac, movie.to_vec()]);
     // The movie is the capture's clock: nothing after it ends.
     merged.truncate(movie.len());
@@ -534,7 +553,7 @@ fn narrate(narration: &Narration, movie: Option<&[f32]>) -> Result<(Vec<f32>, Op
         note.as_deref()
             .unwrap_or("the Mac's first input heard it all")
     ));
-    Ok((merged, note))
+    Ok((merged, note, tracks))
 }
 
 /// What the Mac's inputs heard before the movie's first frame (nothing when they began after it).
@@ -691,9 +710,14 @@ pub fn build_movie_bundle(
                     .ok()
                     .and_then(|a| crate::audio::decode_wav_16k(&a.wav_bytes).ok());
                 pre_roll = before_the_movie(narration).unwrap_or_default();
-                narrate(narration, movie.as_deref()).and_then(|(samples, _)| {
+                narrate(narration, movie.as_deref()).and_then(|(samples, _, tracks)| {
                     let bytes = crate::audio::encode_wav_16k(&samples)?;
                     std::fs::write(&wav, &bytes)?;
+                    if let Err(error) = crate::tracks::write(bundle_dir, &samples, &tracks) {
+                        scrawl_log(format!(
+                            "iPhone narration: could not keep each track: {error:#}"
+                        ));
+                    }
                     crate::audio::recorded_audio_from_wav(bytes)
                 })
             }
@@ -783,6 +807,35 @@ pub fn build_movie_bundle(
         Some(capture.movie),
         capture.note,
         extras,
+    )
+}
+
+/// Builds the bundle of an iPhone capture whose app died before building it, from the mirror's
+/// movie alone (`recover`): its picture and narration, no ink or clicks.
+pub fn recover_movie(bundle_dir: &Path, movie: &Path) -> Result<(PathBuf, ScrawlBundle, String)> {
+    let probe = helper::probe(movie)?;
+    let name = "iPhone";
+    build_movie_bundle(
+        bundle_dir,
+        MovieCapture {
+            movie: movie.to_path_buf(),
+            target: phone_target(name, None, None, probe.width, probe.height),
+            device: DeviceInfo {
+                name: name.into(),
+                capture: "mirror".into(),
+                width: probe.width,
+                height: probe.height,
+                ..Default::default()
+            },
+            events: Vec::new(),
+            strokes: Vec::new(),
+            flags: Vec::new(),
+            note: None,
+            context: BTreeMap::new(),
+            context_changes: Vec::new(),
+            screens: Vec::new(),
+            narration: None,
+        },
     )
 }
 
@@ -2064,24 +2117,24 @@ mod tests {
         // The movie's microphone was AirPods the iPhone took: digital silence throughout.
         let airpods = vec![0.0; 6 * RATE];
         let mac = speech(6, 0.003, &talk);
-        let (merged, note) = narrate(&mac_of(&mac, 0), Some(&airpods)).unwrap();
+        let (merged, note, _) = narrate(&mac_of(&mac, 0), Some(&airpods)).unwrap();
         assert_eq!(merged.len(), airpods.len());
         assert!((merged[RATE / 2] - mac[RATE / 2]).abs() < 1e-4);
         assert_eq!(note, None);
 
         // The Mac's inputs began 500 ms after the movie: they line up on the movie's clock.
-        let (merged, _) = narrate(&mac_of(&mac, 500), Some(&airpods)).unwrap();
+        let (merged, _, _) = narrate(&mac_of(&mac, 500), Some(&airpods)).unwrap();
         assert_eq!(merged[..RATE / 2].iter().filter(|s| **s != 0.0).count(), 0);
         assert!((merged[RATE] - mac[RATE / 2]).abs() < 1e-4);
 
         // The Mac heard nothing: the movie's track stands in.
         let movie = speech(6, 0.0005, &talk);
-        let (merged, note) = narrate(&mac_of(&vec![0.0; 6 * RATE], 0), Some(&movie)).unwrap();
+        let (merged, note, _) = narrate(&mac_of(&vec![0.0; 6 * RATE], 0), Some(&movie)).unwrap();
         assert!((merged[RATE / 2] - movie[RATE / 2]).abs() < 1e-4);
         assert!(note.unwrap().contains("from 0:00"));
 
         // A movie without a microphone track: the Mac's alone.
-        let (merged, _) = narrate(&mac_of(&mac, 0), None).unwrap();
+        let (merged, _, _) = narrate(&mac_of(&mac, 0), None).unwrap();
         assert_eq!(merged.len(), mac.len());
 
         // The mirror's first frame came 2 s after the press: those 2 s are kept for the words.

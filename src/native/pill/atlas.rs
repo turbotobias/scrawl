@@ -139,6 +139,7 @@ pub fn measure_metrics() -> Metrics {
         inspect: measure_text_pt("Inspect", HUD_TEXT, WEIGHT_MEDIUM, false),
         clock_000: measure_text_pt("0:00", HUD_TEXT, WEIGHT_SEMIBOLD, true),
         clock_0000: measure_text_pt("00:00", HUD_TEXT, WEIGHT_SEMIBOLD, true),
+        starting: measure_text_pt(super::model::STARTING, HUD_TEXT, WEIGHT_SEMIBOLD, true),
     }
 }
 
@@ -483,6 +484,11 @@ impl GlyphAtlas {
     }
 
     /// Updates the monospaced timer sprite only when `clock` changes (1 Hz during recording).
+    /// Whether the timer's slot holds `model::STARTING`, not a time.
+    pub fn clock_starting(&self) -> bool {
+        self.clock_text == super::model::STARTING
+    }
+
     pub fn update_clock(&mut self, clock: &str) -> Sprite {
         if self.clock_text == clock {
             return self.clock_sprite;

@@ -5,6 +5,10 @@
 //! from those files in place. Each bundle gets one try (`.recovering`), so a crash that happens
 //! again can't take every launch down with it.
 //!
+//! An iPhone capture whose app died before its bundle was built leaves the mirror's movie,
+//! `recording.mov` (the narration is its audio track). Once that has sat untouched for
+//! `ORPHAN_SETTLE` it is rebuilt from the movie alone (`phone::recover_movie`): no ink or clicks.
+//!
 //! Captures from before the journal (0.3.10 on Windows crashed the same way) left only
 //! `recording.mp4` and `audio.wav`. Once those have sat untouched for `ORPHAN_SETTLE` they are
 //! rebuilt too, from the video and audio alone: the whole frame, no ink or clicks, keyframes from
@@ -32,6 +36,7 @@ const SETTLE: Duration = Duration::from_secs(15);
 /// long.
 const ORPHAN_SETTLE: Duration = Duration::from_secs(10 * 60);
 const VIDEO: &str = "recording.mp4";
+const PHONE_MOVIE: &str = "recording.mov";
 const AUDIO: &str = "audio.wav";
 /// The movie starts this much after the audio at most (measured: 50–500 ms).
 const MAX_VIDEO_OFFSET_MS: u64 = 1_000;
@@ -88,11 +93,19 @@ fn orphaned(dir: &Path) -> bool {
         && !dir.join("timeline.json").exists()
 }
 
+/// A bundle with only an iPhone mirror's movie: the app died before building it. A ScrawlKit
+/// import (`timeline.json`) is left to the phone, which sends it again.
+fn orphaned_phone(dir: &Path) -> bool {
+    dir.join(PHONE_MOVIE).is_file()
+        && !dir.join(UNFINISHED).exists()
+        && !dir.join("timeline.json").exists()
+}
+
 /// Whether a build is still owed to `dir`: nothing built it and it hasn't been tried.
 pub fn owed(dir: &Path) -> bool {
     !dir.join("scrawl.json").exists()
         && !dir.join(RECOVERING).exists()
-        && (dir.join(UNFINISHED).is_file() || orphaned(dir))
+        && (dir.join(UNFINISHED).is_file() || orphaned(dir) || orphaned_phone(dir))
 }
 
 fn untouched_for(path: &Path, now: SystemTime, age: Duration) -> bool {
@@ -113,6 +126,10 @@ pub fn pending(captures: &Path, now: SystemTime) -> Vec<PathBuf> {
                 && owed(dir)
                 && if orphaned(dir) {
                     [dir.clone(), dir.join(VIDEO), dir.join(AUDIO)]
+                        .iter()
+                        .all(|path| untouched_for(path, now, ORPHAN_SETTLE))
+                } else if orphaned_phone(dir) {
+                    [dir.clone(), dir.join(PHONE_MOVIE)]
                         .iter()
                         .all(|path| untouched_for(path, now, ORPHAN_SETTLE))
                 } else {
@@ -200,9 +217,11 @@ pub fn rebuild(dir: &Path, media: &Media) -> Result<String> {
                 media,
             )
         })
+    } else if orphaned_phone(dir) {
+        crate::phone::recover_movie(dir, &dir.join(PHONE_MOVIE)).map(|(_, _, summary)| summary)
     } else {
         Err(anyhow::anyhow!(
-            "{} has neither {UNFINISHED} nor {VIDEO} and {AUDIO}",
+            "{} has neither {UNFINISHED}, {VIDEO} and {AUDIO}, nor {PHONE_MOVIE}",
             dir.display()
         ))
     };
@@ -325,6 +344,25 @@ mod tests {
         } else {
             [30, 60, 220]
         }
+    }
+
+    #[test]
+    fn an_iphone_movie_left_without_its_bundle_is_owed_a_build_once_it_settles() {
+        let captures = temp_dir("phone");
+        let dir = captures.join("p.scrawl");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(PHONE_MOVIE), b"movie").unwrap();
+        assert!(owed(&dir));
+        let now = SystemTime::now();
+        assert!(pending(&captures, now).is_empty(), "still settling");
+        let later = now + ORPHAN_SETTLE + Duration::from_secs(1);
+        assert_eq!(pending(&captures, later), vec![dir.clone()]);
+        // A ScrawlKit import is the phone's to send again; a built bundle owes nothing.
+        std::fs::write(dir.join("timeline.json"), b"{}").unwrap();
+        assert!(!owed(&dir));
+        std::fs::remove_file(dir.join("timeline.json")).unwrap();
+        std::fs::write(dir.join("scrawl.json"), b"{}").unwrap();
+        assert!(!owed(&dir));
     }
 
     /// What a 0.3.10 capture left: its video and audio, nothing else.

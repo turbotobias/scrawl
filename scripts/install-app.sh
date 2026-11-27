@@ -14,6 +14,31 @@ FRAMEWORKS_DIR="${CONTENTS_DIR}/Frameworks"
 SIGN_ID="Developer ID Application: Christopher Langton (QC99C9JE59)"
 SPARKLE_PUBLIC_KEY="mIek27lttJe8cIBqVZFhh6reRKjpTx1h9ZY9OKWPtuM="
 
+# Never replace or restart Scrawl in the middle of a capture: the narration lives in memory until
+# the recording stops, so a restart loses it (and copying over a running binary can crash it).
+# A capture is recording while its bundle has no scrawl.json and its video changed in the last
+# 20 s. SCRAWL_INSTALL_ANYWAY=1 skips the check.
+recording_bundle() {
+  local captures="${SCRAWL_CAPTURES_DIR:-}"
+  if [[ -z "${captures}" && -f "${HOME}/.config/scrawl/config.json" ]]; then
+    captures="$(plutil -extract capturesDir raw -o - "${HOME}/.config/scrawl/config.json" 2>/dev/null || true)"
+  fi
+  captures="${captures:-${HOME}/Library/Application Support/scrawl/captures}"
+  [[ -d "${captures}" ]] || return 1
+  local video
+  while IFS= read -r video; do
+    if [[ ! -f "$(dirname "${video}")/scrawl.json" ]]; then
+      dirname "${video}"
+      return 0
+    fi
+  done < <(find "${captures}" -maxdepth 2 \( -name recording.mp4 -o -name recording.mov \) -mtime -20s 2>/dev/null)
+  return 1
+}
+if [[ -z "${SCRAWL_INSTALL_ANYWAY:-}" && -z "${SCRAWL_NO_LAUNCH:-}" ]] && busy="$(recording_bundle)"; then
+  echo "Scrawl is recording (${busy}); not installing over it. Run this again once it's done." >&2
+  exit 75
+fi
+
 cd "${REPO_DIR}"
 chmod +x "${REPO_DIR}/scripts/setup-sparkle.sh" "${REPO_DIR}/scripts/release-app.sh" 2>/dev/null || true
 SPARKLE_DIR="$("${REPO_DIR}/scripts/setup-sparkle.sh" 2>/dev/null || true)"

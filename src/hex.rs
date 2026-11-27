@@ -1074,6 +1074,7 @@ mod tests {
             live: Default::default(),
             sound: Default::default(),
             switched: None,
+            tracks: Vec::new(),
         };
         let transcript = transcribe_audio(&client(fake.port), "parakeet_v3", "en", &audio).unwrap();
         assert_eq!(fake.requests.lock().unwrap().len(), 2);

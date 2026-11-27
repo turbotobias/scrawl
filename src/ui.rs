@@ -460,6 +460,8 @@ enum MenuAction {
     OpenLatest,
     OpenInbox(PathBuf),
     ExportVideo,
+    /// A track from **Audio of Last Capture** (its file in `tracks/`).
+    UseTrack(String),
     Settings,
     CheckForUpdates,
     Quit,
@@ -471,6 +473,44 @@ static EXPORTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool:
 
 /// Exports the newest bundle to `~/Movies/Scrawl/<name>.mp4` off the main thread, reporting
 /// through `EXPORT_STATUS`, then reveals the file in Finder.
+/// Makes a track of the latest capture its audio (`tracks::choose`) on a worker thread, saying
+/// so beside the menu bar icon, then copies the capture again with its new words.
+fn start_track_switch(file: String) {
+    use std::sync::atomic::Ordering;
+    if EXPORTING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let say = |text: Option<String>| {
+        if let Ok(mut status) = EXPORT_STATUS.lock() {
+            *status = text;
+        }
+    };
+    say(Some("Transcribing…".into()));
+    let spawned = std::thread::Builder::new()
+        .name("scrawl-track".into())
+        .spawn(move || {
+            let result = crate::handoff::load_bundle(std::path::Path::new("latest"))
+                .and_then(|(dir, _)| crate::tracks::choose(&dir, &file).map(|name| (dir, name)));
+            match result {
+                Ok((dir, name)) => {
+                    let _ = crate::handoff::copy_bundle_to_clipboard(&dir);
+                    say(Some(format!("Copied · {name}")));
+                }
+                Err(error) => {
+                    scrawl_log(format!("audio: could not switch tracks: {error:#}"));
+                    say(Some("Couldn't switch audio".into()));
+                }
+            }
+            std::thread::sleep(Duration::from_secs(4));
+            say(None);
+            EXPORTING.store(false, Ordering::SeqCst);
+        });
+    if spawned.is_err() {
+        say(None);
+        EXPORTING.store(false, Ordering::SeqCst);
+    }
+}
+
 fn start_video_export() {
     use std::sync::atomic::Ordering;
     if EXPORTING.swap(true, Ordering::SeqCst) {
@@ -745,6 +785,16 @@ struct ActiveRecording {
 }
 
 impl ActiveRecording {
+    /// The capsule's timer: `STARTING` while the iPhone mirror's movie hasn't begun.
+    fn clock(&self) -> String {
+        match &self.source {
+            CaptureSource::Phone(session) if !session.has_recording() => {
+                crate::native::pill::model::STARTING.to_owned()
+            }
+            _ => format_clock(self.elapsed_ms()),
+        }
+    }
+
     fn elapsed_ms(&self) -> u64 {
         match &self.source {
             CaptureSource::Screen { session, .. } => session.elapsed_ms(),
@@ -2302,7 +2352,10 @@ impl ScrawlCoordinator {
             .as_ref()
             .map(ActiveRecording::elapsed_ms);
         let elapsed_ms = recording_ms.unwrap_or(self.last_elapsed_ms);
-        let clock = format_clock(elapsed_ms);
+        let clock = self
+            .active_recording
+            .as_ref()
+            .map_or_else(|| format_clock(elapsed_ms), ActiveRecording::clock);
         let has_iphone = self.iphone.is_some();
 
         let pres = match self.island_phase {
@@ -3651,7 +3704,10 @@ impl Render for HudPillWindow {
         let island_velocity = coord.island_velocity;
         let highlight_prev = coord.highlight_prev;
         let highlight_p = ease_out_cubic(motion::age(coord.highlight_since) / HIGHLIGHT_FADE_S);
-        let clock = format_clock(elapsed_ms);
+        let clock = coord
+            .active_recording
+            .as_ref()
+            .map_or_else(|| format_clock(elapsed_ms), ActiveRecording::clock);
         let has_iphone = coord.iphone.is_some();
         let lit = coord.recording_mode();
         let completed_note = coord.completed_note.clone();
@@ -6019,6 +6075,7 @@ pub fn run_app(
                                     }
                                 }
                                 MenuAction::ExportVideo => start_video_export(),
+                                MenuAction::UseTrack(file) => start_track_switch(file),
                                 MenuAction::Settings => {
                                     loop_coord.update(cx, |coord, _| coord.open_settings(None));
                                 }

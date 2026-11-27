@@ -51,6 +51,7 @@ mod sketch;
 #[cfg(target_os = "macos")]
 mod sparkle;
 mod speech_model;
+mod tracks;
 mod transcribe;
 mod ui;
 mod web;
@@ -243,6 +244,15 @@ enum Command {
         /// Draw the box and arrow with the shape tools instead of by hand (README stills).
         #[arg(long, hide = true)]
         shapes: bool,
+    },
+    /// List the microphones a capture recorded from (`latest` for the newest), or with `--use`
+    /// make one of them its audio and rebuild its transcript and summary.
+    Audio {
+        /// Path to `.scrawl` bundle directory or `latest`.
+        bundle: PathBuf,
+        /// The track's number in the list (0 is the mix), or part of its name.
+        #[arg(long = "use", value_name = "TRACK")]
+        pick: Option<String>,
     },
     /// Record a live screen + microphone capture from the terminal for a fixed duration.
     Record {
@@ -893,6 +903,14 @@ pub fn finalize_capture_bundle(
         let wav_path = bundle_dir.join("audio.wav");
         let _ = std::fs::create_dir_all(bundle_dir);
         let _ = std::fs::write(&wav_path, &audio.wav_bytes);
+        if audio.tracks.len() > 1
+            && let Err(error) = crate::audio::decode_wav_16k(&audio.wav_bytes)
+                .and_then(|mixed| tracks::write(bundle_dir, &mixed, &audio.tracks))
+        {
+            capture::scrawl_log(format!(
+                "audio: could not keep each microphone's track: {error:#}"
+            ));
+        }
     }
     let wav_path = bundle_dir.join("audio.wav");
     let has_wav = wav_path.exists();
@@ -1669,6 +1687,24 @@ fn main() -> Result<()> {
                 win::shell::wait_for_relauncher();
             }
             ui::run_app(None, record, iphone, None);
+            Ok(())
+        }
+        Command::Audio { bundle, pick } => {
+            let (dir, _) = handoff::load_bundle(&bundle)?;
+            let Some(list) = tracks::read(&dir) else {
+                println!("{} recorded from one microphone.", dir.display());
+                return Ok(());
+            };
+            match pick {
+                Some(pick) => {
+                    let name = tracks::choose(&dir, &pick)?;
+                    println!(
+                        "{} now uses {name}; its transcript and summary.md are rebuilt.",
+                        dir.display()
+                    );
+                }
+                None => print!("{}", tracks::describe(&list)),
+            }
             Ok(())
         }
         Command::Demo {

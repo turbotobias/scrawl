@@ -1513,8 +1513,19 @@ fn emit_elem_prims(
             let cycle = 1.6_f32;
             let ripple = (t / cycle).fract();
             let breath = 0.5 + 0.5 * (std::f32::consts::TAU * t / cycle).cos();
+            // Waiting for the first frame: a grey dot breathing, no ripple, the words dimmed.
+            let starting = atlas.clock_starting();
+            let (dot, text_a) = if starting {
+                ([0.62, 0.62, 0.66], 0.62)
+            } else {
+                ([0.941, 0.267, 0.220], 1.0)
+            };
             let halo_r = 4.0 + 6.0 * ripple;
-            let halo_a = 0.34 * (1.0 - ripple).powi(2);
+            let halo_a = if starting {
+                0.0
+            } else {
+                0.34 * (1.0 - ripple).powi(2)
+            };
             push_shape(
                 out,
                 [
@@ -1524,13 +1535,18 @@ fn emit_elem_prims(
                     halo_r * 2.0,
                 ],
                 halo_r,
-                [0.941, 0.267, 0.220, halo_a],
+                [dot[0], dot[1], dot[2], halo_a],
             );
+            let dot_a = if starting {
+                0.35 + 0.5 * breath
+            } else {
+                0.78 + 0.22 * breath
+            };
             push_shape(
                 out,
                 [ox + 12.0, oy + 12.0, 8.0, 8.0],
                 4.0,
-                [0.941, 0.267, 0.220, 0.78 + 0.22 * breath],
+                [dot[0], dot[1], dot[2], dot_a],
             );
             push_sprite(
                 out,
@@ -1541,7 +1557,7 @@ fn emit_elem_prims(
                     tx.size_pt[1],
                 ],
                 tx.uv,
-                [0.961, 0.961, 0.969, 1.0],
+                [0.961, 0.961, 0.969, text_a],
             );
         }
         ElemId::Route0 | ElemId::Route1 => {

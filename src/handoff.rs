@@ -946,10 +946,11 @@ fn ssh(host: &str) -> Command {
 }
 
 /// Bundle files too big to hold up queueing the session; they follow in the background.
-pub const HEAVY_MEDIA: [&str; 5] = [
+pub const HEAVY_MEDIA: [&str; 6] = [
     "recording.mp4",
     "recording.mov",
     "audio.wav",
+    crate::tracks::DIR,
     "frames-full",
     "contact-sheet-full.png",
 ];
@@ -971,6 +972,7 @@ pub fn sync_bundle_to(host: &str, bundle_dir: &Path) -> Result<()> {
             "--exclude=*/recording.mp4",
             "--exclude=*/recording.mov",
             "--exclude=*/audio.wav",
+            "--exclude=*/tracks",
             "--exclude=*/frames-full",
             "--exclude=*/contact-sheet-full.png",
             "--exclude=*/.media-sending",

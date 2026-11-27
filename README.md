@@ -290,7 +290,10 @@ add another (System default included); without an order of your own it's the cho
 the Mac's built-in microphone. It's saved as `"microphones": [{"id", "name"}, …]`. At most three
 record at once; a Bluetooth headset's microphone switches it to call quality while it records.
 iPhone captures use the order too: the Mac's inputs record the narration, and the mirror's movie
-records the first of them as one more backup.
+records the first of them as one more backup. Every input's own track is kept, so when the mix
+picked wrong, **Audio of Last Capture** in the menu (or `scrawl audio <bundle> --use <n>`) makes one
+of them the capture's audio, transcribes it again and copies the capture again. While recording,
+the waveform follows the first input that's sending sound.
 
 **Show live audio while recording** (off by default, `"liveAudio": true`) puts a waveform beside
 the timer while you record, so you can see the microphone is hearing you: dim dots are silence,
